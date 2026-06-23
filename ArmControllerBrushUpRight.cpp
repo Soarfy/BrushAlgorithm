@@ -1165,9 +1165,9 @@ int main()
         double offsetYs = loadedJson.value("brushyoffsets", 0.0);
         double offsetZs = loadedJson.value("brushzoffsets", 0.0);
 
-        double tcpx = -9.748236 - offsetXs;
-        double tcpy = -186.312977 - offsetYs;
-        double tcpz = 223.252632 - offsetZs;
+        double tcpx = -9.748236;
+        double tcpy = -186.312977;
+        double tcpz = 223.252632;
 
         std::string tcpvalue = "{" + std::to_string(tcpx) + "," +
                                std::to_string(tcpy) + "," +
@@ -1205,10 +1205,18 @@ int main()
     if (userInputcalibrate == 'y' || userInputcalibrate == 'Y')
     {
         demo->moveRobotC(brushcalibratepoint, brushcalibratepoint);
-        std::cout << "是否到达标定位置？(y/n)" << std::endl;
-        char userInputcalibrateok;
-        std::cin >> userInputcalibrateok;
-        if (userInputcalibrateok == 'y' || userInputcalibrateok == 'Y')
+        // ---- 到达标定位置后, 需用户确认到达标定点才能继续 ----
+        while (true)
+        {
+            std::cout << "是否已到达标定位置？(y/n)" << std::endl;
+            char userInputcalibrateok;
+            std::cin >> userInputcalibrateok;
+            if (userInputcalibrateok == 'y' || userInputcalibrateok == 'Y')
+                break;
+            std::cout << "未确认到达标定位置, 重新前往标定位置..." << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            demo->moveRobotC(brushcalibratepoint, brushcalibratepoint);
+        }
         {
             std::cout << "到达标定位置,请开始下一步" << std::endl;
 
@@ -1375,9 +1383,9 @@ int main()
 
         std::cout << "牙刷微調完成，偏移量已保存。" << std::endl;
 
-        double tcpx = -9.748236 + vecB.x;
-        double tcpy = -186.312977 - vecB.y;
-        double tcpz = 223.252632 - vecB.z;
+        double tcpx = -9.748236;
+        double tcpy = -186.312977;
+        double tcpz = 223.252632;
         double tcprx = 0.0;
         double tcpry = 0.0;
         double tcprz = 0.0;
@@ -1420,9 +1428,9 @@ int main()
             pointa.rz = -145.9055;
             demo->moveRobotC(pointa, pointa);
 
-            double tcpx = -9.748236 - offsetXs;
-            double tcpy = -186.312977 - offsetYs;
-            double tcpz = 223.252632 - offsetZs;
+            double tcpx = -9.748236;
+            double tcpy = -186.312977;
+            double tcpz = 223.252632;
             double tcprx = 0.0;
             double tcpry = 0.0;
             double tcprz = 0.0;
@@ -1772,6 +1780,7 @@ int main()
     {
         // ================= 模式1 / 模式3 精简自动流程 =================
         const std::string Std_Traj_Json = "../defaultconfig/rightup/standard_trajectory.json";
+        const std::string Std_Traj_Json_NoComp = "../defaultconfig/rightup/standard_trajectory_nocomp.json";
 
         // ---- C 到达标定点(不做TCP标定) ----
         if (plan.gotoCalib)
@@ -1786,6 +1795,22 @@ int main()
             std::cout << "[模式" << mode << "] 前往标定位置(不做TCP标定), 注意安全..." << std::endl;
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
             demo->moveRobotC(brushcalibratepoint, brushcalibratepoint);
+
+            // ---- 到达标定位置后, 需用户确认到达标定点才能继续 ----
+            while (true)
+            {
+                std::cout << "[模式" << mode << "] 是否已到达标定位置？(y/n)" << std::endl;
+                char userInputcalibrateok;
+                std::cin >> userInputcalibrateok;
+                if (userInputcalibrateok == 'y' || userInputcalibrateok == 'Y')
+                {
+                    std::cout << "[模式" << mode << "] 已确认到达标定位置, 请开始下一步" << std::endl;
+                    break;
+                }
+                std::cout << "[模式" << mode << "] 未确认到达标定位置, 重新前往标定位置..." << std::endl;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                demo->moveRobotC(brushcalibratepoint, brushcalibratepoint);
+            }
         }
 
         // ---- 加载已有牙刷偏移并设置TCP(不做TCP标定/不做牙刷微调) ----
@@ -1804,9 +1829,9 @@ int main()
             double offsetYs = loadedJson.value("brushyoffsets", 0.0);
             double offsetZs = loadedJson.value("brushzoffsets", 0.0);
 
-            double tcpx = -9.748236 - offsetXs;
-            double tcpy = -186.312977 - offsetYs;
-            double tcpz = 223.252632 - offsetZs;
+            double tcpx = -9.748236;
+            double tcpy = -186.312977;
+            double tcpz = 223.252632;
             std::string tcpvalue = "{" + std::to_string(tcpx) + "," +
                                    std::to_string(tcpy) + "," +
                                    std::to_string(tcpz) + ",0,0,0}";
@@ -1903,10 +1928,19 @@ int main()
         else
         {
             // ---- 模式3: 复用模式1保存的 json 标准轨迹 ----
-            std::cout << "[模式3] 复用标准轨迹(json): " << Std_Traj_Json << std::endl;
-            if (!loadStandardTrajectoryJson(Std_Traj_Json, brushpointsoffset_ee_poses))
+            std::cout << "[模式3] 选择复用的标准轨迹: 1=有补偿(微调后)  2=无补偿(原始未微调)\n请选择(1/2): ";
+            int stdTrajSel = 1;
+            std::cin >> stdTrajSel;
+            if (std::cin.fail())
             {
-                std::cerr << "无法加载标准轨迹json(请先用模式1生成): " << Std_Traj_Json << std::endl;
+                std::cin.clear();
+                std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+            }
+            const std::string chosenStdTraj = (stdTrajSel == 2) ? Std_Traj_Json_NoComp : Std_Traj_Json;
+            std::cout << "[模式3] 复用标准轨迹(json): " << chosenStdTraj << std::endl;
+            if (!loadStandardTrajectoryJson(chosenStdTraj, brushpointsoffset_ee_poses))
+            {
+                std::cerr << "无法加载标准轨迹json(请先用模式1生成): " << chosenStdTraj << std::endl;
                 return -1;
             }
             backupForceTrajectoryFile(Force_FILE_PATH);
@@ -1918,6 +1952,16 @@ int main()
         {
             std::cerr << "轨迹为空！" << std::endl;
             return -1;
+        }
+
+        // ---- 模式1: 保存"无补偿"(原始未微调)标准轨迹为 json ----
+        if (plan.saveStdJson)
+        {
+            if (saveStandardTrajectoryJson(Std_Traj_Json_NoComp, brushpointsoffset_ee_poses))
+                std::cout << "[模式1] 无补偿标准轨迹(原始未微调)已保存为json: " << Std_Traj_Json_NoComp
+                          << " (" << brushpointsoffset_ee_poses.size() << " 点)" << std::endl;
+            else
+                std::cerr << "[模式1] 无补偿标准轨迹json保存失败: " << Std_Traj_Json_NoComp << std::endl;
         }
 
         // ---- K 轨迹微调循环(模式1/3都做) ----
