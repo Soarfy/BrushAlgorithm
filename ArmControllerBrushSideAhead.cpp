@@ -9,6 +9,7 @@
 #include <cmath>
 #include <vector>
 #include <limits>
+#include <functional>
 #include "DobotTcpDemo.h"
 #include <windows.h>
 #include "kw-lib-all.h"
@@ -440,10 +441,20 @@ Vector3 transformVectorAToB(Vector3 vA, double rx, double ry, double rz)
     vB.y = r12 * vA.x + r22 * vA.y + r32 * vA.z;
     vB.z = r13 * vA.x + r23 * vA.y + r33 * vA.z;
 
-    std::cout << vB.x << " ," << vB.y << " ," << vB.z << " ," << std::endl;
-
     return vB;
 }
+
+/* ======================= 资源清理守卫 ======================= */
+// 析构时统一释放设备资源(停止采集 + 释放机械臂句柄)，覆盖所有 return 退出路径
+struct ScopeExit
+{
+    std::function<void()> fn;
+    ~ScopeExit()
+    {
+        if (fn)
+            fn();
+    }
+};
 
 /* ======================= 运行模式 ======================= */
 // 1=基础轨迹配置模式  2=随机模式(保留全部交互)  3=轨迹复用模式
@@ -650,6 +661,18 @@ int main()
     SetConsoleCP(CP_UTF8);
     DobotTcpDemo *demo = new DobotTcpDemo();
 
+    // 资源守卫：任何 return 路径都会停止力采集并释放 demo，避免泄漏/重复释放
+    ScopeExit deviceGuard{[&]()
+                          {
+                              if (obj)
+                                  obj->StopCapture();
+                              if (demo)
+                              {
+                                  delete demo;
+                                  demo = nullptr;
+                              }
+                          }};
+
     // 任意点回到起始点
     demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
     Dobot::CDescartesPoint startfirst{};
@@ -668,6 +691,11 @@ int main()
               << "请选择(1/2/3): ";
     int mode = 2;
     std::cin >> mode;
+    if (std::cin.fail())
+    {
+        std::cin.clear();
+        std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+    }
     if (mode != 1 && mode != 2 && mode != 3)
     {
         std::cout << "无效模式输入, 默认使用 2 (随机模式)\n";
@@ -1741,7 +1769,6 @@ int main()
         // z不参与
         offset.z = descartesPoints[0].z;
         bool converged = false;
-        bool firststep = false;
         int forceTuneIter = 0;
         const int kMaxForceTuneIter = 200;
 
@@ -1756,15 +1783,6 @@ int main()
             Eigen::Matrix3d rotationMatrix = eulerDegToRotationMatrix(offset.rx, offset.ry, offset.rz);
             Eigen::Vector3d brushDir = rotationMatrix.col(2);
             brushDir.normalize();
-            // 沿用上次的调整(理想状态下会加速)
-            if (firststep)
-            {
-                Eigen::Vector3d delta = firstcount * 0.6 * brushDir;
-                offset.x += delta.x();
-                offset.y += delta.y();
-                // offset.z += delta.z();
-                firststep = false;
-            }
 
             demo->moveRobotC(offset, offset);
             double gxsa, gysa, gzsa, grxsa, grysa, grzsa;
@@ -1785,13 +1803,14 @@ int main()
                         break;
                     }
                 }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
 
-            float force[6];
+            float force[6]{};
             while (obj->GetCurrentForceData(force) != 28 && force[2] != 0)
             {
                 std::cerr << "获取力控数据失败\n";
-                // return -1;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
             force[0] -= forcefirst[0];
             force[1] -= forcefirst[1];
@@ -2238,13 +2257,6 @@ int main()
     demo->moveRobotC(pointsafe, pointsafe);
 
     std::cout << "正在退出程序請稍後：-）" << std::endl;
-    obj->StopCapture();
-    demo->~DobotTcpDemo();
-
-    delete demo;
-
-    obj = nullptr;
-    demo = nullptr;
-
+    // 设备资源(StopCapture + delete demo)统一由 deviceGuard 在退出时释放
     return 0;
 }
