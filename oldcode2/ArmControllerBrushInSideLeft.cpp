@@ -11,7 +11,6 @@
 #include <limits>
 #include <functional>
 #include "DobotTcpDemo.h"
-#include "TcpConfigHelper.h"
 #include <windows.h>
 #include "kw-lib-all.h"
 #include <string>
@@ -27,104 +26,6 @@ NS_KW_USING
 #define M_PI 3.14159265358979323846
 #endif
 constexpr double RAD2DEG = 180.0 / M_PI;
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
-double xA = 0, yA = 0, zA = 0, rxA = 0, ryA = 0, rzA = 0;
-double xB = 0, yB = 0, zB = 0, rxB = 0, ryB = 0, rzB = 0; // B绕Z旋转90度
-double dxm = 0, dym = 0, dzm = 0, drxm = 0, drym = 0, drzm = 0;
-
-const double PI = 3.14159265358979323846;
-const double DEG_TO_RAD = PI / 180.0;
-const double RAD_TO_DEG = 180.0 / PI;
-
-// 将欧拉角（度）转换为旋转矩阵
-Eigen::Matrix3d eulerToRotationMatrix(double rx_deg, double ry_deg, double rz_deg)
-{
-    // 转换为弧度
-    double rx = rx_deg * DEG_TO_RAD;
-    double ry = ry_deg * DEG_TO_RAD;
-    double rz = rz_deg * DEG_TO_RAD;
-
-    Eigen::Matrix3d R_x, R_y, R_z;
-
-    R_x << 1, 0, 0,
-        0, cos(rx), -sin(rx),
-        0, sin(rx), cos(rx);
-
-    R_y << cos(ry), 0, sin(ry),
-        0, 1, 0,
-        -sin(ry), 0, cos(ry);
-
-    R_z << cos(rz), -sin(rz), 0,
-        sin(rz), cos(rz), 0,
-        0, 0, 1;
-
-    return R_z * R_y * R_x; // ZYX顺序
-}
-
-// 将旋转矩阵转换为欧拉角（度）
-void rotationMatrixToEuler(const Eigen::Matrix3d &R, double &rx_deg, double &ry_deg, double &rz_deg)
-{
-    double rx, ry, rz; // 弧度
-
-    ry = atan2(-R(2, 0), sqrt(R(0, 0) * R(0, 0) + R(1, 0) * R(1, 0)));
-
-    if (fabs(cos(ry)) > 1e-6)
-    {
-        rx = atan2(R(2, 1) / cos(ry), R(2, 2) / cos(ry));
-        rz = atan2(R(1, 0) / cos(ry), R(0, 0) / cos(ry));
-    }
-    else
-    {
-        // 万向锁情况
-        rz = 0;
-        if (ry > 0)
-        {
-            rx = atan2(R(0, 1), R(1, 1));
-        }
-        else
-        {
-            rx = atan2(-R(0, 1), -R(1, 1));
-        }
-    }
-
-    // 转换为度
-    rx_deg = rx * RAD_TO_DEG;
-    ry_deg = ry * RAD_TO_DEG;
-    rz_deg = rz * RAD_TO_DEG;
-}
-
-// 计算B相对于A的变换（角度单位为度）
-// 输入：A和B在世界坐标系（机械臂基坐标系）下的姿态（位置单位任意，角度单位为度）
-// 输出：B相对于A的平移和旋转（角度输出为度）
-void computeRelativeTransform(double xA, double yA, double zA, double rxA_deg, double ryA_deg, double rzA_deg,
-                              double xB, double yB, double zB, double rxB_deg, double ryB_deg, double rzB_deg,
-                              double &dx, double &dy, double &dz,
-                              double &drx_deg, double &dry_deg, double &drz_deg)
-{
-    // 构造A和B的变换矩阵（内部自动转换角度）
-    Eigen::Matrix3d R_A = eulerToRotationMatrix(rxA_deg, ryA_deg, rzA_deg);
-    Eigen::Matrix3d R_B = eulerToRotationMatrix(rxB_deg, ryB_deg, rzB_deg);
-
-    Eigen::Vector3d t_A(xA, yA, zA);
-    Eigen::Vector3d t_B(xB, yB, zB);
-
-    // 计算从A到B的相对变换
-    // T_A_B = inv(T_A) * T_B
-    Eigen::Matrix3d R_rel = R_A.transpose() * R_B;
-    Eigen::Vector3d t_rel = R_A.transpose() * (t_B - t_A);
-
-    // 输出相对平移
-    dx = t_rel(0);
-    dy = t_rel(1);
-    dz = t_rel(2);
-
-    // 将相对旋转矩阵转换为欧拉角（度）
-    rotationMatrixToEuler(R_rel, drx_deg, dry_deg, drz_deg);
-}
 
 /* ======================= 数据结构 ======================= */
 struct PointData
@@ -159,59 +60,6 @@ Eigen::Vector3d getRotatedZAxisFromDegrees(double rx_deg, double ry_deg, double 
     Eigen::AngleAxisd yaw(rz, Eigen::Vector3d::UnitZ());
     Eigen::Quaterniond q = yaw * pitch * roll;
     return q * Eigen::Vector3d::UnitZ();
-}
-
-/* ======================= 拖拽微调函数 ======================= */
-void dragTuneXYZ(DobotTcpDemo *demo, Dobot::CDescartesPoint &curPose,
-                 Eigen::Vector3d &totalOffset)
-{
-    // 拖拽前记录刷尖(tool5)在base系的位置
-    double bx = 0, by = 0, bz = 0, brx = 0, bry = 0, brz = 0;
-    while (!demo->getCurrentPose(0, 5, bx, by, bz, brx, bry, brz))
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(300)); // 进入拖拽前等待到位稳定
-    demo->startDrag();
-    std::cout << "\n===== 拖拽微调模式 =====\n"
-              << "机械臂已进入拖拽模式：请手动拖动机械臂，使刷尖到达目标位置。\n"
-              << "(拖拽时姿态rx/ry/rz会变化，确认后会自动恢复为原始姿态，仅采用xyz位移)\n"
-              << "完成后按 Enter 确认...\n";
-    while (true)
-    {
-        if (_kbhit())
-        {
-            if (_getch() == 13)
-                break;
-        }
-        Sleep(10);
-    }
-
-    // 拖拽后记录刷尖(tool5)在base系的位置
-    double ax = 0, ay = 0, az = 0, arx = 0, ary = 0, arz = 0;
-    while (!demo->getCurrentPose(0, 5, ax, ay, az, arx, ary, arz))
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    demo->stopDrag();
-    std::this_thread::sleep_for(std::chrono::milliseconds(300)); // 等待退出拖拽模式稳定
-
-    // base系下刷尖位移 = 需要施加到法兰轨迹点上的偏移(平移与姿态无关)
-    double dx = ax - bx;
-    double dy = ay - by;
-    double dz = az - bz;
-    totalOffset += Eigen::Vector3d(dx, dy, dz);
-
-    // 恢复原始姿态、采用拖拽后的xyz：对法兰点做相同的base系平移
-    curPose.x += dx;
-    curPose.y += dy;
-    curPose.z += dz;
-    demo->moveRobotC(curPose, curPose);
-
-    Dobot::CDescartesPoint lifted = curPose;
-    lifted.z += 100; // 基坐标系 Z 上抬 100mm
-    demo->moveRobotC(lifted, lifted);
-
-    std::cout << "拖拽位移(刷尖, base系)[mm]: " << dx << ", " << dy << ", " << dz << std::endl;
-    std::cout << "累计偏移[mm]: " << totalOffset.transpose() << std::endl;
 }
 
 void fineTuneXYZ(DobotTcpDemo *demo, Dobot::CDescartesPoint &curPose,
@@ -550,10 +398,10 @@ static bool loadStandardTrajectoryJson(const std::string &path, std::vector<Poin
 int main()
 {
     // @@@@@@@@@@@@@@@@@@@@@@@@區別代碼@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-    const std::string Force_FILE_PATH = "../defaultconfig/rightside/sideright.txt";
-    // const std::string Brush_offset = "../defaultconfig/rightside/brushoffsets.json";
+    const std::string Force_FILE_PATH = "../defaultconfig/leftinside/insideleft.txt";
+    // const std::string Brush_offset = "../defaultconfig/leftinside/brushoffsets.json";
 
-    const std::string Movs_FORCE_LOG_PATHs = "../defaultconfig/rightside/movs_force_during_movs.txt";
+    const std::string Movs_FORCE_LOG_PATHs = "../defaultconfig/leftinside/movs_force_during_movs.txt";
     std::ofstream forcerepaired(Movs_FORCE_LOG_PATHs);
     if (!forcerepaired.is_open())
     {
@@ -561,9 +409,9 @@ int main()
         return -1;
     }
     const std::string Brush_offset = "../defaultconfig/brushoffsets.json";
-    const std::string Brush_offset_path = "../defaultconfig/rightside/brushoffsets_path.json";
+    const std::string Brush_offset_path = "../defaultconfig/leftinside/brushoffsets_path.json";
     const std::string Brush_Config = "../defaultconfig/config.json";
-    int value = 2;
+    int value = 5;
 
     std::string command1 = "cmd /c \"D:\\UsmileProject\\hand_eye_calibration\\.venv312\\Scripts\\activate"
                            "&& python D:\\UsmileProject\\hand_eye_calibration\\GenerateAnyPath.py " +
@@ -577,19 +425,757 @@ int main()
                            "&& python D:\\UsmileProject\\hand_eye_calibration\\TCPRotation10OthersDorobot.py " +
                            std::to_string(value) + "\"";
 
-    const std::string oldsegment = "../defaultconfig/rightside/all_segments.txt";
-    std::string indexFilePath = "../defaultconfig/rightside/all_segments.txt";
-    std::string indexFilePath2 = "../defaultconfig/rightside/support_points.txt";
-    std::ofstream poseFile("../defaultconfig/rightside/current_pose_from_getpose.txt");
-    const std::string eepath = "../defaultconfig/rightside/ee_poses.txt";
+    const std::string oldsegment = "../defaultconfig/leftinside/all_segments.txt";
+    std::string indexFilePath = "../defaultconfig/leftinside/all_segments.txt";
+    std::string indexFilePath2 = "../defaultconfig/leftinside/support_points.txt";
+    std::ofstream poseFile("../defaultconfig/leftinside/current_pose_from_getpose.txt");
+    const std::string eepath = "../defaultconfig/leftinside/ee_poses.txt";
 
     Dobot::CDescartesPoint rotatetooljoint{};
     rotatetooljoint.x = 0.0;
     rotatetooljoint.y = 0;
     rotatetooljoint.z = 0;
-    rotatetooljoint.rx = 0;
+    rotatetooljoint.rx = -10;
     rotatetooljoint.ry = -45;
     rotatetooljoint.rz = 0;
+
+    //     Dobot::CDescartesPoint rotatetooljointjump{};
+    //     rotatetooljointjump.x = 0;
+    //     rotatetooljointjump.y = 0;
+    //     rotatetooljointjump.z = -50;
+    //     rotatetooljointjump.rx = 0;
+    //     rotatetooljointjump.ry = 0;
+    //     rotatetooljointjump.rz = 0;
+
+    //     double modifiedup = 0;
+
+    //     // ==================讀取json文件=======================
+    //     std::string teethModelPath;
+    //     std::string toothbrushPath;
+    //     int brushIterations;
+    //     double brushSpeed;
+    //     int backAndForthCount;
+    //     double pressureParameter;
+    //     int brushDuration;
+    //     try
+    //     {
+    //         std::ifstream file(Brush_Config);
+    //         if (!file.is_open())
+    //         {
+    //             std::cerr << "无法打开 config.json 文件" << std::endl;
+    //             return -1;
+    //         }
+    //         json j;
+    //         file >> j;
+    //         teethModelPath = j.at("teethModelPath").get<std::string>();
+    //         toothbrushPath = j.at("toothbrushPath").get<std::string>();
+    //         brushIterations = j.at("brushIterations").get<int>();
+    //         brushSpeed = j.at("brushSpeed").get<double>();
+    //         backAndForthCount = j.at("backAndForthCount").get<int>();
+    //         pressureParameter = j.at("pressureParameter").get<double>();
+    //         brushDuration = j.at("brushDuration").get<int>();
+
+    //         std::cout << "teethModelPath: " << teethModelPath << std::endl;
+    //         std::cout << "toothbrushPath: " << toothbrushPath << std::endl;
+    //         std::cout << "brushIterations: " << brushIterations << std::endl;
+    //         std::cout << "brushSpeed: " << brushSpeed << std::endl;
+    //         std::cout << "backAndForthCount: " << backAndForthCount << std::endl;
+    //         std::cout << "pressureParameter: " << pressureParameter << std::endl;
+    //         std::cout << "brushDuration: " << brushDuration << std::endl;
+    //     }
+    //     catch (std::exception &e)
+    //     {
+    //         std::cerr << "JSON 解析错误: " << e.what() << std::endl;
+    //         return -1;
+    //     }
+
+    //     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@設備初始化@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+    //     SetConsoleOutputCP(CP_UTF8);
+    // #if MODE == 0
+    //     SerialControlCreator uc;
+    // #ifdef WIN32
+    //     uc.serialPortName = "\\\\.\\COM3";
+    // #else
+    //     uc.serialPortName = "/dev/ttyUSB0";
+    // #endif
+    //     uc.baudRate = 460800;
+    // #elif MODE == 1
+    //     UdpControlCreator uc;
+    //     uc.sensorIp = "192.168.1.101";
+    //     uc.localIp = "192.168.1.100";
+    //     uc.localPort = 8886;
+    // #elif MODE == 2
+    // #endif
+    //     auto control = uc.createIOControler();
+    //     HeadTailProtocolCreator htc;
+    //     auto proto = htc.createProtocol();
+    //     SensorControlCreator scc;
+    //     scc.ioCtrl = control;
+    //     scc.proto = proto;
+    //     auto obj = scc.createSensorControl();
+    //     int hr = obj->StartCapture();
+    //     if (hr != 0)
+    //     {
+    //         printf("start capture faield\n");
+    //         return -1;
+    //     }
+    //     SetConsoleCP(CP_UTF8);
+    //     DobotTcpDemo *demo = new DobotTcpDemo();
+
+    //     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@回到初始态@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+    //     Dobot::CDescartesPoint pointsafe{};
+    //     pointsafe.x = 264.8929;
+    //     pointsafe.y = -285.1852;
+    //     pointsafe.z = 491.0669;
+    //     pointsafe.rx = -179.7725;
+    //     pointsafe.ry = -1.3507;
+    //     pointsafe.rz = -145.9055;
+    //     demo->moveRobotC(pointsafe, pointsafe);
+
+    //     Dobot::CDescartesPoint pointa{};
+    //     pointa.x = 264.8929;
+    //     pointa.y = -285.1852;
+    //     pointa.z = 391.0669 + modifiedup;
+    //     pointa.rx = -179.7725;
+    //     pointa.ry = -1.3507;
+    //     pointa.rz = -145.9055;
+    //     demo->moveRobotC(pointa, pointa);
+
+    //     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@微調牙刷@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+    //     const double REF_X = 264.8929;
+    //     const double REF_Y = -285.1852;
+    //     const double REF_Z = 391.0669 + modifiedup;
+    //     std::cout << "是否進行牙刷微調？(y/n): ";
+    //     char userInput;
+    //     std::cin >> userInput;
+
+    //     if (userInput == 'y' || userInput == 'Y')
+    //     {
+    //         Eigen::Vector3d totalOffset = getManualOffset(demo, REF_X, REF_Y, REF_Z);
+    //         json offsetJson;
+    //         offsetJson["brushxoffset"] = totalOffset.x();
+    //         offsetJson["brushyoffset"] = totalOffset.y();
+    //         offsetJson["brushzoffset"] = totalOffset.z();
+
+    //         std::ofstream file(Brush_offset);
+    //         file << offsetJson.dump(4);
+    //         file.close();
+
+    //         std::cout << "牙刷微調完成，偏移量已保存。" << std::endl;
+    //     }
+    //     else
+    //     {
+    //         std::ifstream inputFile(Brush_offset);
+    //         if (inputFile.is_open())
+    //         {
+    //             json loadedJson;
+    //             inputFile >> loadedJson;
+    //             inputFile.close();
+
+    //             // 讀取偏移量
+    //             double offsetX = loadedJson["brushxoffset"];
+    //             double offsetY = loadedJson["brushyoffset"];
+    //             double offsetZ = loadedJson["brushzoffset"];
+
+    //             Dobot::CDescartesPoint pointa{};
+    //             pointa.x = 264.8929 + offsetX;
+    //             pointa.y = -285.1852 + offsetY;
+    //             pointa.z = 391.0669 + modifiedup + offsetZ;
+    //             pointa.rx = -179.7725;
+    //             pointa.ry = -1.3507;
+    //             pointa.rz = -145.9055;
+    //             demo->moveRobotC(pointa, pointa);
+    //             std::cout << "机械臂到达起始点" << std::endl;
+    //             std::cout << "跳過牙刷微調。" << std::endl;
+    //         }
+    //     }
+
+    //     bool userSatisfied = false;
+
+    //     // @@@@@@@@@@@@@@@@@@@@@@@@@@牙刷標定后軌跡選擇@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+    //     std::cout << "是否生成新軌跡？(y/n): ";
+    //     char choice;
+    //     std::cin >> choice;
+
+    //     std::cout << "選擇" << choice << std::endl;
+
+    //     if (choice == 'y' || choice == 'Y')
+    //     {
+    //         std::cout << "生成的轨迹..." << std::endl;
+    //         int python_result2 = std::system(command1.c_str());
+    //         if (python_result2 == 0)
+    //         {
+    //             std::cout << "新轨迹生成成功！" << std::endl;
+    //         }
+    //         else
+    //         {
+    //             std::cout << "新轨迹生成失败！" << std::endl;
+    //             return -1;
+    //         }
+    //     }
+    //     else
+    //     {
+    //         std::cout << "正在使用已导入的轨迹..." << std::endl;
+    //         int python_result1 = std::system(command2.c_str());
+    //         if (python_result1 == 0)
+    //         {
+    //             std::cout << "已导入轨迹使用成功！" << std::endl;
+    //             indexFilePath = oldsegment;
+    //         }
+    //         else
+    //         {
+    //             std::cout << "已导入轨迹使用失败！" << std::endl;
+    //             return -1;
+    //         }
+    //     }
+
+    //     // @@@@@@@@@@@@@@@@@@@@@@@@@@调整牙刷起始姿态@@@@@@@@@@@@@@@@@@
+
+    //     // 先上去，再旋转，再下来
+    //     std::cout << "牙刷初始旋转姿态调整，请确认Enter" << std::endl;
+    //     std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+    //     demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
+    //     demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
+    //     std::cout << "牙刷初始旋转姿态已经调整好，请确认Enter" << std::endl;
+    //     std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+
+    //     double gxdown, gydown, gzdown, grxdown, grydown, grzdown;
+    //     while (!demo->getCurrentPose(0, 0, gxdown, gydown, gzdown, grxdown, grydown, grzdown))
+    //     {
+    //         std::cout << "获取姿态中。。。。。" << std::endl;
+    //     }
+    //     Dobot::CDescartesPoint firstPoseback{};
+    //     firstPoseback.x = gxdown;
+    //     firstPoseback.y = gydown;
+    //     firstPoseback.z = gzdown - 50;
+    //     firstPoseback.rx = grxdown;
+    //     firstPoseback.ry = grydown;
+    //     firstPoseback.rz = grzdown;
+    //     demo->moveRobotC(firstPoseback, firstPoseback);
+    //     std::cout << "牙刷初始姿态已经调整好，请确认Enter" << std::endl;
+    //     std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+
+    //     // ========== 从控制器读取真实位姿（GetPose） ==========
+    //     double gx, gy, gz, grx, gry, grz;
+    //     while (true)
+    //     {
+    //         if (demo->getCurrentPose(0, 0, gx, gy, gz, grx, gry, grz))
+    //         {
+    //             std::cout << gx << " " << gy << " " << gz << " "
+    //                       << grx << " " << gry << " " << grz << std::endl;
+
+    //             if (!std::isnan(gx) && !std::isnan(gy) && !std::isnan(gz) &&
+    //                 !std::isnan(grx) && !std::isnan(gry) && !std::isnan(grz))
+    //             {
+
+    //                 if (poseFile.is_open())
+    //                 {
+    //                     poseFile << gx << " " << gy << " " << gz << " "
+    //                              << grx << " " << gry << " " << grz << std::endl;
+    //                     poseFile.close();
+    //                     std::cout << "当前刷头位置已经保存下去\n";
+    //                 }
+    //                 else
+    //                 {
+    //                     std::cerr << "当前刷头位置已经保存失败\n";
+    //                 }
+    //                 break;
+    //             }
+    //             else
+    //             {
+    //                 std::cerr << "获取当前刷头位置函数返回失败\n";
+    //             }
+    //         }
+    //         else
+    //         {
+    //             std::cerr << "获取当前刷头位置失败，重新尝试\n";
+    //         }
+    //         std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    //     }
+
+    //     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@生成的轨迹转移到机械臂末端@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+    //     std::cout << "将轨迹转移到机械臂末端" << std::endl;
+    //     int python_result11 = std::system(command3.c_str());
+    //     std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    //     firstPoseback.z += 20;
+    //     demo->moveRobotC(firstPoseback, firstPoseback);
+
+    //     // ================= 读取轨迹 =================
+
+    //     std::ifstream ee_poses_infile(eepath);
+    //     std::vector<PointData> brushpointsoffset_ee_poses;
+    //     if (!ee_poses_infile.is_open())
+    //     {
+    //         std::cerr << "无法打开 ee_poses.txt" << std::endl;
+    //         return -1;
+    //     }
+    //     double dx, dy, dz, rx, ry, rz;
+    //     while (ee_poses_infile >> dx >> dy >> dz >> rx >> ry >> rz)
+    //     {
+    //         brushpointsoffset_ee_poses.push_back({dx, dy, dz, rx, ry, rz});
+    //     }
+    //     ee_poses_infile.close();
+    //     if (brushpointsoffset_ee_poses.empty())
+    //     {
+    //         std::cerr << "轨迹为空！" << std::endl;
+    //         return -1;
+    //     }
+
+    //     while (!userSatisfied)
+    //     {
+    //         std::cout << "\n=========== 新一轮轨迹调整开始 ===========\n";
+
+    //         Dobot::CDescartesPoint firstPose{};
+    //         firstPose.x = brushpointsoffset_ee_poses[0].x;
+    //         firstPose.y = brushpointsoffset_ee_poses[0].y;
+    //         firstPose.z = brushpointsoffset_ee_poses[0].z;
+    //         firstPose.rx = brushpointsoffset_ee_poses[0].a;
+    //         firstPose.ry = brushpointsoffset_ee_poses[0].b;
+    //         firstPose.rz = brushpointsoffset_ee_poses[0].c;
+    //         demo->moveRobotC(pointsafe, pointsafe);
+    //         demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
+
+    //         // 根據軌跡向量來補償
+    //         Eigen::Matrix3d rotationMatrixs = eulerDegToRotationMatrix(firstPose.rx, firstPose.ry, firstPose.rz);
+    //         Eigen::Vector3d brushDirs = rotationMatrixs.col(2);
+    //         brushDirs.normalize();
+
+    //         Dobot::CDescartesPoint pointstart{};
+    //         pointstart.x = firstPose.x + -brushDirs.x() * 8;
+    //         pointstart.y = firstPose.y + -brushDirs.y() * 8;
+    //         pointstart.z = firstPose.z + -brushDirs.z() * 8;
+    //         pointstart.rx = firstPose.rx;
+    //         pointstart.ry = firstPose.ry;
+    //         pointstart.rz = firstPose.rz;
+    //         demo->moveRobotC(pointstart, pointstart);
+    //         // 從 offsetpath.json 讀取 deltaOffset 初始值
+    //         Eigen::Vector3d deltaOffset(0, 0, 0);
+
+    //         // 檢查檔案是否存在，若存在則讀取
+    //         // std::ifstream file(Brush_offset_path);
+    //         // if (file.good())
+    //         // {
+    //         //     nlohmann::json j;
+    //         //     file >> j;
+    //         //     deltaOffset[0] = j["offsetpath_x"];
+    //         //     deltaOffset[1] = j["offsetpath_y"];
+    //         //     deltaOffset[2] = j["offsetpath_z"];
+    //         // }
+    //         // 若檔案不存在，則保持預設的 (0, 0, 0)
+    //         // firstPose.x += deltaOffset[0];
+    //         // firstPose.y += deltaOffset[1];
+    //         // firstPose.z += deltaOffset[2];
+
+    //         demo->moveRobotC(firstPose, firstPose);
+
+    //         // std::cout << "机械臂到达起始点，请确认按Enter" << std::endl;
+    //         // std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+
+    //         // 執行 fineTuneXYZ 進行調整
+    //         fineTuneXYZ(demo, firstPose, deltaOffset);
+
+    //         // 調整完成後，將更新後的 deltaOffset 存回 JSON
+    //         // {
+    //         //     nlohmann::json j;
+    //         //     j["offsetpath_x"] = deltaOffset[0];
+    //         //     j["offsetpath_y"] = deltaOffset[1];
+    //         //     j["offsetpath_z"] = deltaOffset[2];
+
+    //         //     std::ofstream out_file(Brush_offset_path);
+    //         //     out_file << j.dump(4);
+    //         // }
+
+    //         for (auto &p : brushpointsoffset_ee_poses)
+    //         {
+    //             p.x += deltaOffset.x();
+    //             p.y += deltaOffset.y();
+    //             p.z += deltaOffset.z();
+    //         }
+
+    //         std::vector<Dobot::CDescartesPoint> descartesPoints;
+    //         for (const auto &p : brushpointsoffset_ee_poses)
+    //         {
+    //             Dobot::CDescartesPoint cp{};
+    //             cp.x = p.x;
+    //             cp.y = p.y;
+    //             cp.z = p.z;
+    //             cp.rx = p.a;
+    //             cp.ry = p.b;
+    //             cp.rz = p.c;
+    //             descartesPoints.push_back(cp);
+    //         }
+
+    //         Dobot::MovSParams params;
+    //         params.tool = 0;
+    //         params.user = 0;
+    //         params.v = 80;
+    //         params.a = 80;
+    //         // params.speed = brushSpeed;
+    //         params.freq = 0.2;
+    //         demo->movsDemoC(descartesPoints, params);
+
+    //         std::cout << "\n是否满意当前调整后的轨迹？(y/n): ";
+    //         char choice;
+    //         std::cin >> choice;
+    //         std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+
+    //         demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
+
+    //         if (choice == 'y' || choice == 'Y')
+    //         {
+    //             userSatisfied = true;
+    //             std::cout << "调整完成 ✅\n";
+    //         }
+    //         else
+    //         {
+    //             std::cout << "继续调整...\n";
+    //         }
+    //     }
+
+    //     demo->moveRobotC(pointsafe, pointsafe);
+    //     demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
+
+    //     Dobot::CDescartesPoint firstPoses{};
+    //     firstPoses.x = brushpointsoffset_ee_poses[0].x;
+    //     firstPoses.y = brushpointsoffset_ee_poses[0].y;
+    //     firstPoses.z = brushpointsoffset_ee_poses[0].z;
+    //     firstPoses.rx = brushpointsoffset_ee_poses[0].a;
+    //     firstPoses.ry = brushpointsoffset_ee_poses[0].b;
+    //     firstPoses.rz = brushpointsoffset_ee_poses[0].c;
+    //     Eigen::Matrix3d rotationMatrixss = eulerDegToRotationMatrix(firstPoses.rx, firstPoses.ry, firstPoses.rz);
+    //     Eigen::Vector3d brushDirss = rotationMatrixss.col(2);
+    //     brushDirss.normalize();
+
+    //     Dobot::CDescartesPoint pointstarts{};
+    //     pointstarts.x = firstPoses.x + -brushDirss.x() * 8;
+    //     pointstarts.y = firstPoses.y + -brushDirss.y() * 8;
+    //     pointstarts.z = firstPoses.z + -brushDirss.z() * 8;
+    //     pointstarts.rx = firstPoses.rx;
+    //     pointstarts.ry = firstPoses.ry;
+    //     pointstarts.rz = firstPoses.rz;
+    //     demo->moveRobotC(pointstarts, pointstarts);
+
+    //     std::cout << "微调结束回到安全点，请确认按Enter" << std::endl;
+    //     std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+
+    //     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@添加力控@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+    //     double targetforcevalue = pressureParameter;
+    //     std::cout << "\n理想的壓力值是 :  " << targetforcevalue << std::endl;
+    //     std::vector<Dobot::CDescartesPoint> descartesPointsforce;
+    //     std::ofstream forcerepairedoutputfile(Force_FILE_PATH);
+    //     if (!forcerepairedoutputfile.is_open())
+    //     {
+    //         std::cerr << "无法保存含有力控的路径" << std::endl;
+    //         return -1;
+    //     }
+
+    //     // @@@@@@@@@@@@@@@@@@@对6维力清零@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+    //     float forcefirst[6];
+    //     int sampleCount = 0;
+    //     const int maxSamples = 30;
+    //     bool success = false;
+    //     while (sampleCount < maxSamples)
+    //     {
+    //         int result = obj->GetCurrentForceData(forcefirst);
+    //         if (result == 28 && forcefirst[2] > -3.0 && forcefirst[0] < 1.0 && forcefirst[2] < -1.0)
+    //         {
+    //             success = true;
+    //             break;
+    //         }
+    //         sampleCount++;
+    //         if (sampleCount < maxSamples)
+    //         {
+    //             std::cerr << "采样 " << sampleCount << " 次失败，继续采样...\n";
+    //         }
+    //         else
+    //         {
+    //             std::cerr << "采样 " << sampleCount << " 次均失败\n";
+    //         }
+    //     }
+
+    //     printf("力控X: %.2f 力控Y: %.2f 力控Z: %.2f \n", forcefirst[0], forcefirst[1], forcefirst[2]);
+
+    //     std::vector<Dobot::CDescartesPoint> descartesPoints;
+    //     for (const auto &p : brushpointsoffset_ee_poses)
+    //     {
+    //         Dobot::CDescartesPoint cp{};
+    //         cp.x = p.x;
+    //         cp.y = p.y;
+    //         cp.z = p.z;
+    //         cp.rx = p.a;
+    //         cp.ry = p.b;
+    //         cp.rz = p.c;
+    //         descartesPoints.push_back(cp);
+    //     }
+
+    //     std::cout << "开始结合力控进行运动" << std::endl;
+
+    //     for (size_t i = 0; i < descartesPoints.size(); ++i)
+    //     {
+    //         auto &offset = descartesPoints[i];
+    //         bool converged = false;
+    //         int firstcount = 0;
+    //         while (!converged)
+    //         {
+    //             float force[6];
+    //            while (obj->GetCurrentForceData(force) != 28 && force[2] != 0)
+    //             {
+    //                 std::cerr << "获取力控数据失败\n";
+    //                 return -1;
+    //             }
+    //             force[0] -= forcefirst[0];
+    //             force[1] -= forcefirst[1];
+    //             force[2] -= forcefirst[2];
+    //             demo->moveRobotC(offset, offset);
+
+    //             double gxsa, gysa, gzsa, grxsa, grysa, grzsa;
+    //             double targetxsa, targetysa, targetzsa;
+    //             targetxsa = offset.x;
+    //             targetysa = offset.y;
+    //             targetzsa = offset.z;
+
+    //             while (true)
+    //             {
+    //                 if (demo->getCurrentPose(0, 0, gxsa, gysa, gzsa, grxsa, grysa, grzsa))
+    //                 {
+    //                     double diffxsa = fabs(gxsa - targetxsa);
+    //                     double diffysa = fabs(gysa - targetysa);
+    //                     double diffzsa = fabs(gzsa - targetzsa);
+
+    //                     if (diffxsa < 0.01 && diffysa < 0.01 && diffzsa < 0.01)
+    //                     {
+    //                         break;
+    //                     }
+    //                 }
+    //             }
+
+    //             Eigen::Matrix3d rotationMatrix = eulerDegToRotationMatrix(offset.rx, offset.ry, offset.rz);
+    //             Eigen::Vector3d brushDir = rotationMatrix.col(2);
+    //             brushDir.normalize();
+    //             std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    //             Eigen::Vector3d measured(force[0], force[1], force[2]);
+    //             double proj = measured.dot(brushDir);
+    //             double err = proj - targetforcevalue;
+         /*   if(targetforcevalue == 0){
+                err = 0.0;
+            }*/
+
+    //             std::cout << "  realerr = " << err << std::endl;
+
+    //             Eigen::Vector3d targetDir(0, 0, -1);
+    //             double dotProduct = brushDir.dot(targetDir);
+    //             double brushDirNorm = brushDir.norm();
+    //             double targetDirNorm = targetDir.norm();
+    //             double angleRad = std::acos(dotProduct / (brushDirNorm * targetDirNorm));
+    //             double angleDeg = angleRad * 180.0 / M_PI;
+
+    //             if (angleDeg > 6.0)
+    //             {
+    //                 if (std::abs(err) <= 0.04)
+    //                 {
+    //                     converged = true;
+    //                     break;
+    //                 }
+    //                 else if (err > 0.04)
+    //                 {
+    //                     Eigen::Vector3d delta = -0.6 * brushDir;
+    //                     offset.x += delta.x();
+    //                     offset.y += delta.y();
+    //                     offset.z += delta.z();
+    //                 }
+    //                 else if (err < -0.04)
+    //                 {
+    //                     Eigen::Vector3d delta = 0.6 * brushDir;
+    //                     offset.x += delta.x();
+    //                     offset.y += delta.y();
+    //                     offset.z += delta.z();
+    //                 }
+    //             }
+    //             else
+    //             {
+    //                 if (std::abs(err) <= 0.04)
+    //                 {
+    //                     converged = true;
+    //                     break;
+    //                 }
+    //                 else if (err > 0.04)
+    //                 {
+    //                     Eigen::Vector3d delta = -0.6 * brushDir;
+    //                     offset.x += delta.x();
+    //                     offset.y += delta.y();
+    //                     offset.z += delta.z();
+    //                 }
+    //                 else if (err < -0.04)
+    //                 {
+    //                     Eigen::Vector3d delta = 0.6 * brushDir;
+    //                     offset.x += delta.x();
+    //                     offset.y += delta.y();
+    //                     offset.z += delta.z();
+    //                 }
+    //             }
+
+    //             // std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    //         }
+
+    //         // ##########################保存修正后的轨迹##########################
+    //         forcerepairedoutputfile << offset.x << " "
+    //                                 << offset.y << " "
+    //                                 << offset.z << " "
+    //                                 << offset.rx << " "
+    //                                 << offset.ry << " "
+    //                                 << offset.rz << std::endl;
+
+    //         descartesPointsforce.push_back(offset);
+    //     }
+
+    //     forcerepairedoutputfile.close();
+    //     std::cout << "调整后的力控轨迹保存完毕" << std::endl;
+    //     demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
+    //     demo->moveRobotC(pointsafe, pointsafe);
+    //     demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
+
+    //     Dobot::CDescartesPoint firstPosesk{};
+    //     firstPosesk.x = descartesPointsforce[0].x;
+    //     firstPosesk.y = descartesPointsforce[0].y;
+    //     firstPosesk.z = descartesPointsforce[0].z;
+    //     firstPosesk.rx = descartesPointsforce[0].rx;
+    //     firstPosesk.ry = descartesPointsforce[0].ry;
+    //     firstPosesk.rz = descartesPointsforce[0].rz;
+    //     Eigen::Matrix3d rotationMatrixssk = eulerDegToRotationMatrix(firstPosesk.rx, firstPosesk.ry, firstPosesk.rz);
+    //     Eigen::Vector3d brushDirssk = rotationMatrixssk.col(2);
+    //     brushDirssk.normalize();
+
+    //     Dobot::CDescartesPoint pointstartsk{};
+    //     pointstartsk.x = firstPosesk.x + -brushDirssk.x() * 8;
+    //     pointstartsk.y = firstPosesk.y + -brushDirssk.y() * 8;
+    //     pointstartsk.z = firstPosesk.z + -brushDirssk.z() * 8;
+    //     pointstartsk.rx = firstPosesk.rx;
+    //     pointstartsk.ry = firstPosesk.ry;
+    //     pointstartsk.rz = firstPosesk.rz;
+    //     demo->moveRobotC(pointstartsk, pointstartsk);
+    //     demo->moveRobotC(firstPosesk, firstPosesk);
+
+    //     std::cout << "运行完整力控轨迹（每行一次movsDemoC）" << std::endl;
+    //     std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+
+    //     Dobot::MovSParams params1;
+    //     params1.tool = 0;
+    //     params1.user = 0;
+    //     params1.v = 80;
+    //     params1.a = 80;
+    //     params1.freq = 0.2;
+
+    //     std::ifstream indexFile(indexFilePath);
+    //     if (!indexFile.is_open())
+    //     {
+    //         std::cerr << "无法打开索引文件: " << indexFilePath << std::endl;
+    //         return -1;
+    //     }
+
+    //     std::string line;
+    //     int lineNumber = 0;
+    //     while (std::getline(indexFile, line))
+    //     {
+    //         lineNumber++;
+    //         std::istringstream iss(line);
+    //         int idx;
+    //         std::vector<Dobot::CDescartesPoint> selectedPoints;
+
+    //         while (iss >> idx)
+    //         {
+    //             if (idx >= 0 && idx < (int)descartesPointsforce.size())
+    //             {
+    //                 selectedPoints.push_back(descartesPointsforce[idx]);
+    //             }
+    //             else
+    //             {
+    //                 std::cerr << "\n第 " << lineNumber << " 行索引 " << idx << " 超出范围 (0-"
+    //                           << descartesPointsforce.size() - 1 << ")" << std::endl;
+    //             }
+    //         }
+
+    //         if (!selectedPoints.empty())
+    //         {
+    //             // 安全到达
+    //             selectedPoints[0].z += 10;
+    //             demo->moveRobotC(selectedPoints[0], selectedPoints[0]);
+    //             std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    //             Dobot::CDescartesPoint rotatetooljointjumps{};
+    //             rotatetooljointjumps.x = 0;
+    //             rotatetooljointjumps.y = 0;
+    //             rotatetooljointjumps.z = -10;
+    //             rotatetooljointjumps.rx = 0;
+    //             rotatetooljointjumps.ry = 0;
+    //             rotatetooljointjumps.rz = 0;
+    //             demo->RelMovJDemo(rotatetooljointjumps, 0, 5, 20, 50, 100);
+
+    //             selectedPoints[0].z -= 10;
+    //             demo->moveRobotC(selectedPoints[0], selectedPoints[0]);
+    //             std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    //             demo->movsDemoC(selectedPoints, params1);
+    //             std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    //             Dobot::CDescartesPoint rotatetooljointjumpss{};
+    //             rotatetooljointjumpss.x = -15;
+    //             rotatetooljointjumpss.y = 0;
+    //             rotatetooljointjumpss.z = 0;
+    //             rotatetooljointjumpss.rx = 0;
+    //             rotatetooljointjumpss.ry = 0;
+    //             rotatetooljointjumpss.rz = 0;
+    //             demo->RelMovJDemo(rotatetooljointjumpss, 0, 5, 20, 50, 100);
+
+    //             // 扶刷
+    //             // Dobot::CDescartesPoint rotatetooljoints{};
+    //             // rotatetooljoints.x = 0;
+    //             // rotatetooljoints.y = 0;
+    //             // rotatetooljoints.z = 12;
+    //             // rotatetooljoints.rx = 0;
+    //             // rotatetooljoints.ry = 0;
+    //             // rotatetooljoints.rz = 0;
+    //             // demo->RelMovJDemo(rotatetooljoints, 0, 3, 60, 80, 100);
+    //             // rotatetooljoints.z = 0;
+    //             // rotatetooljoints.ry = -10;
+    //             // demo->RelMovJDemo(rotatetooljoints, 0, 3, 60, 80, 100);
+    //             // demo->RelMovJDemo(rotatetooljoints, 0, 3, 60, 80, 100);
+    //             // demo->RelMovJDemo(rotatetooljoints, 0, 3, 60, 80, 100);
+    //             // demo->RelMovJDemo(rotatetooljoints, 0, 3, 60, 80, 100);
+    //             // rotatetooljoints.ry = 0;
+    //             // rotatetooljoints.x = -12;
+    //             // demo->RelMovJDemo(rotatetooljoints, 0, 3, 60, 80, 100);
+    //             // std::this_thread::sleep_for(std::chrono::seconds(2));
+    //         }
+    //     }
+
+    //     // 基于当前点往上抬
+    //     Dobot::CDescartesPoint rotatetooljointup{};
+    //     rotatetooljointup.x = 0;
+    //     rotatetooljointup.y = 0;
+    //     rotatetooljointup.z = -60;
+    //     rotatetooljointup.rx = 0;
+    //     rotatetooljointup.ry = 0;
+    //     rotatetooljointup.rz = 0;
+
+    //     demo->RelMovJDemo(rotatetooljointup, 0, 0, 20, 50, 100);
+
+    //     indexFile.close();
+
+    //     // 退出
+    //     demo->moveRobotC(pointsafe, pointsafe);
+
+    //     std::cout << "正在退出程序請稍後：-）" << std::endl;
+    //     obj->StopCapture();
+    //     demo->~DobotTcpDemo();
+
+    //     delete demo;
+
+    //     obj = nullptr;
+    //     demo = nullptr;
+
+    //     return 0;
+    // }
 
     Dobot::CDescartesPoint rotatetooljointjump{};
     rotatetooljointjump.x = 0;
@@ -600,16 +1186,9 @@ int main()
     rotatetooljointjump.rz = 0;
 
     double modifiedup = 0;
-
     double modifiedupx = -6.9142260000002125 + 14.163013999999862;
     double modifiedupy = -2.0350259999999025 - 24.190834000000166;
     double modifiedupz = 101.3919;
-
-    double modifyoffsetX = 0;
-    double modifyoffsetY = 0;
-    double modifyoffsetZ = 0;
-
-    // double gxdownfirst, gydownfirst, gzdownfirst, grxdownfirst, grydownfirst, grzdownfirst;
 
     // ==================讀取json文件=======================
     std::string teethModelPath;
@@ -707,7 +1286,6 @@ int main()
     startfirst.rz = -145.9050;
     demo->moveRobotC(startfirst, startfirst);
 
-
     std::cout << "\n=========== 运行模式选择 ===========\n"
               << "1 = 基础轨迹配置模式 (到位不标定 / 不微调牙刷 / 生成新标准轨迹并存json / 微调+力控)\n"
               << "2 = 随机模式 (保留全部交互提示, 原始流程)\n"
@@ -764,16 +1342,9 @@ int main()
         double offsetYs = loadedJson.value("brushyoffsets", 0.0);
         double offsetZs = loadedJson.value("brushzoffsets", 0.0);
 
-        TcpXyz brushTcp = loadDefaultBrushTcp();
-
-
-        double tcpx = brushTcp.x;
-
-
-        double tcpy = brushTcp.y;
-
-
-        double tcpz = brushTcp.z;
+        double tcpx = -9.748236;
+        double tcpy = -186.312977;
+        double tcpz = 223.252632;
 
         std::string tcpvalue = "{" + std::to_string(tcpx) + "," +
                                std::to_string(tcpy) + "," +
@@ -829,24 +1400,6 @@ int main()
         std::cout << "向量在坐标系 B 下的值为：" << std::endl;
         std::cout << "X: " << vecB.x << "\nY: " << vecB.y << "\nZ: " << vecB.z << std::endl;
 
-        // 检查 offsetJson 是否包含 "brushxoffsetmodify" 键
-        if (offsetJson.contains("brushxoffsetmodify") &&
-            offsetJson.contains("brushyoffsetmodify") &&
-            offsetJson.contains("brushzoffsetmodify"))
-        {
-            modifyoffsetX = offsetJson["brushxoffsetmodify"];
-            modifyoffsetY = offsetJson["brushyoffsetmodify"];
-            modifyoffsetZ = offsetJson["brushzoffsetmodify"];
-        }
-        else
-        {
-            std::cout << "警告：offsetJson 中缺少修改偏移量键，跳过加载。" << std::endl;
-            // 或者设置默认值
-            modifyoffsetX = 0.0;
-            modifyoffsetY = 0.0;
-            modifyoffsetZ = 0.0;
-        }
-
         offsetJson["brushxoffsets"] = vecB.x;
         offsetJson["brushyoffsets"] = vecB.y;
         offsetJson["brushzoffsets"] = vecB.z;
@@ -857,19 +1410,14 @@ int main()
 
         std::cout << "牙刷微調完成，偏移量已保存。" << std::endl;
 
-        TcpXyz brushTcp = loadDefaultBrushTcp();
-
-
-        double tcpx = brushTcp.x;
-
-
-        double tcpy = brushTcp.y;
-
-
-        double tcpz = brushTcp.z;
+        double tcpx = -9.748236;
+        double tcpy = -186.312977;
+        double tcpz = 223.252632;
         double tcprx = 0.0;
         double tcpry = 0.0;
         double tcprz = 0.0;
+
+        
 
         std::string tcpvalue = "{" + std::to_string(tcpx) + "," +
                                std::to_string(tcpy) + "," +
@@ -894,18 +1442,9 @@ int main()
             double offsetY = loadedJson["brushyoffset"];
             double offsetZ = loadedJson["brushzoffset"];
 
-            double offsetXs = loadedJson.value("brushxoffsets", 0.0);
-            double offsetYs = loadedJson.value("brushyoffsets", 0.0);
-            double offsetZs = loadedJson.value("brushzoffsets", 0.0);
-
-            if (loadedJson.contains("brushxoffsetmodify") &&
-                loadedJson.contains("brushyoffsetmodify") &&
-                loadedJson.contains("brushzoffsetmodify"))
-            {
-                modifyoffsetX = loadedJson["brushxoffsetmodify"];
-                modifyoffsetY = loadedJson["brushyoffsetmodify"];
-                modifyoffsetZ = loadedJson["brushzoffsetmodify"];
-            }
+            double offsetXs = loadedJson["brushxoffsets"];
+            double offsetYs = loadedJson["brushyoffsets"];
+            double offsetZs = loadedJson["brushzoffsets"];
 
             Dobot::CDescartesPoint pointa{};
             pointa.x = 264.8929 + modifiedupx + offsetX;
@@ -918,19 +1457,14 @@ int main()
             std::cout << "机械臂到达起始点" << std::endl;
             std::cout << "跳過牙刷微調。" << std::endl;
 
-            TcpXyz brushTcp = loadDefaultBrushTcp();
-
-
-            double tcpx = brushTcp.x;
-
-
-            double tcpy = brushTcp.y;
-
-
-            double tcpz = brushTcp.z;
+            double tcpx = -9.748236;
+            double tcpy = -186.312977;
+            double tcpz = 223.252632;
             double tcprx = 0.0;
             double tcpry = 0.0;
             double tcprz = 0.0;
+
+           
 
             std::string tcpvalue = "{" + std::to_string(tcpx) + "," +
                                    std::to_string(tcpy) + "," +
@@ -983,6 +1517,8 @@ int main()
     }
 
     // @@@@@@@@@@@@@@@@@@@@@@@@@@调整牙刷起始姿态@@@@@@@@@@@@@@@@@@
+
+    // 先上去，再旋转，再下来
     std::cout << "牙刷初始旋转姿态调整，请确认Enter" << std::endl;
     std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
     demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
@@ -1006,6 +1542,7 @@ int main()
     std::cout << "牙刷初始姿态已经调整好，请确认Enter" << std::endl;
     std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
 
+    // ========== 从控制器读取真实位姿（GetPose） ==========
     double gx, gy, gz, grx, gry, grz;
     while (true)
     {
@@ -1043,21 +1580,33 @@ int main()
         std::this_thread::sleep_for(std::chrono::milliseconds(60));
     }
 
-    double gxdown2s, gydown2s, gzdown2s, grxdown2s, grydown2s, grzdown2s;
-    while (!demo->getCurrentPose(0, 5, gxdown2s, gydown2s, gzdown2s, grxdown2s, grydown2s, grzdown2s))
-    {
-        std::cout << "获取姿态中。。。。。" << std::endl;
-    }
-
-    std::cout << "侧向tcp位置调整后" << gxdown2s << " " << gydown2s << " " << gzdown2s << " "
-              << grxdown2s << " " << grydown2s << " " << grzdown2s << std::endl;
-
     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@生成的轨迹转移到机械臂末端@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
     std::cout << "将轨迹转移到机械臂末端" << std::endl;
     int python_result11 = std::system(command3.c_str());
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     firstPoseback.z += 20;
     demo->moveRobotC(firstPoseback, firstPoseback);
+
+    // ================= 读取轨迹 =================
+
+    // std::ifstream ee_poses_infile(eepath);
+    // std::vector<PointData> brushpointsoffset_ee_poses;
+    // if (!ee_poses_infile.is_open())
+    // {
+    //     std::cerr << "无法打开 ee_poses.txt" << std::endl;
+    //     return -1;
+    // }
+    // double dx, dy, dz, rx, ry, rz;
+    // while (ee_poses_infile >> dx >> dy >> dz >> rx >> ry >> rz)
+    // {
+    //     brushpointsoffset_ee_poses.push_back({dx, dy, dz, rx, ry, rz});
+    // }
+    // ee_poses_infile.close();
+    // if (brushpointsoffset_ee_poses.empty())
+    // {
+    //     std::cerr << "轨迹为空！" << std::endl;
+    //     return -1;
+    // }
 
     // 询问用户是否沿用原来的轨迹
     std::cout << "是否沿用原来的轨迹？(y/n): ";
@@ -1093,30 +1642,124 @@ int main()
         return -1;
     }
 
-    // 添加一个标志位来判断是否是第一次运行
-    bool isFirstRun = false;
+    // while (!userSatisfied)
+    // {
+    //     std::cout << "\n=========== 新一轮轨迹调整开始 ===========\n";
+
+    //     Dobot::CDescartesPoint firstPose{};
+    //     firstPose.x = brushpointsoffset_ee_poses[0].x;
+    //     firstPose.y = brushpointsoffset_ee_poses[0].y;
+    //     firstPose.z = brushpointsoffset_ee_poses[0].z;
+    //     firstPose.rx = brushpointsoffset_ee_poses[0].a;
+    //     firstPose.ry = brushpointsoffset_ee_poses[0].b;
+    //     firstPose.rz = brushpointsoffset_ee_poses[0].c;
+    //     demo->moveRobotC(pointsafe, pointsafe);
+    //     demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
+
+    //     // 根據軌跡向量來補償
+    //     Eigen::Matrix3d rotationMatrixs = eulerDegToRotationMatrix(firstPose.rx, firstPose.ry, firstPose.rz);
+    //     Eigen::Vector3d brushDirs = rotationMatrixs.col(2);
+    //     brushDirs.normalize();
+
+    //     Dobot::CDescartesPoint pointstart{};
+    //     pointstart.x = firstPose.x + -brushDirs.x() * 8;
+    //     pointstart.y = firstPose.y + -brushDirs.y() * 8;
+    //     pointstart.z = firstPose.z + -brushDirs.z() * 8;
+    //     pointstart.rx = firstPose.rx;
+    //     pointstart.ry = firstPose.ry;
+    //     pointstart.rz = firstPose.rz;
+    //     demo->moveRobotC(pointstart, pointstart);
+    //     // 從 offsetpath.json 讀取 deltaOffset 初始值
+    //     Eigen::Vector3d deltaOffset(0, 0, 0);
+
+    //     // 檢查檔案是否存在，若存在則讀取
+    //     // std::ifstream file(Brush_offset_path);
+    //     // if (file.good())
+    //     // {
+    //     //     nlohmann::json j;
+    //     //     file >> j;
+    //     //     deltaOffset[0] = j["offsetpath_x"];
+    //     //     deltaOffset[1] = j["offsetpath_y"];
+    //     //     deltaOffset[2] = j["offsetpath_z"];
+    //     // }
+    //     // 若檔案不存在，則保持預設的 (0, 0, 0)
+    //     // firstPose.x += deltaOffset[0];
+    //     // firstPose.y += deltaOffset[1];
+    //     // firstPose.z += deltaOffset[2];
+
+    //     demo->moveRobotC(firstPose, firstPose);
+
+    //     // std::cout << "机械臂到达起始点，请确认按Enter" << std::endl;
+    //     // std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+
+    //     // 執行 fineTuneXYZ 進行調整
+    //     fineTuneXYZ(demo, firstPose, deltaOffset);
+
+    //     // 調整完成後，將更新後的 deltaOffset 存回 JSON
+    //     // {
+    //     //     nlohmann::json j;
+    //     //     j["offsetpath_x"] = deltaOffset[0];
+    //     //     j["offsetpath_y"] = deltaOffset[1];
+    //     //     j["offsetpath_z"] = deltaOffset[2];
+
+    //     //     std::ofstream out_file(Brush_offset_path);
+    //     //     out_file << j.dump(4);
+    //     // }
+
+    //     for (auto &p : brushpointsoffset_ee_poses)
+    //     {
+    //         p.x += deltaOffset.x();
+    //         p.y += deltaOffset.y();
+    //         p.z += deltaOffset.z();
+    //     }
+
+    //     std::vector<Dobot::CDescartesPoint> descartesPoints;
+    //     for (const auto &p : brushpointsoffset_ee_poses)
+    //     {
+    //         Dobot::CDescartesPoint cp{};
+    //         cp.x = p.x;
+    //         cp.y = p.y;
+    //         cp.z = p.z;
+    //         cp.rx = p.a;
+    //         cp.ry = p.b;
+    //         cp.rz = p.c;
+    //         descartesPoints.push_back(cp);
+    //     }
+
+    //     Dobot::MovSParams params;
+    //     params.tool = 0;
+    //     params.user = 0;
+    //     params.v = 80;
+    //     params.a = 80;
+    //     // params.speed = brushSpeed;
+    //     params.freq = 0.2;
+    //     demo->movsDemoC(descartesPoints, params);
+
+    //     std::cout << "\n是否满意当前调整后的轨迹？(y/n): ";
+    //     char choice;
+    //     std::cin >> choice;
+    //     std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+
+    //     demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
+
+    //     if (choice == 'y' || choice == 'Y')
+    //     {
+    //         userSatisfied = true;
+    //         std::cout << "调整完成 ✅\n";
+    //     }
+    //     else
+    //     {
+    //         std::cout << "继续调整...\n";
+    //     }
+    // }
+
+    bool isFirstRun = true;
     Eigen::Vector3d totalDeltaOffset(0, 0, 0); // 使用独立的累积偏移变量
-
-    // 在 while 循环之前，先读取一次 Brush_offset 文件
-    std::ifstream inputFile(Brush_offset);
-    if (!inputFile.is_open())
-    {
-        std::cerr << "无法打开文件进行读取：" << Brush_offset << std::endl;
-        return -1; // 或者处理错误
-    }
-
-    json loadedJson;
-    inputFile >> loadedJson;
-    inputFile.close();
-
-    // 获取初始偏移量
-    double offsetX = loadedJson["brushxoffset"];
-    double offsetY = loadedJson["brushyoffset"];
-    double offsetZ = loadedJson["brushzoffset"];
 
     while (!userSatisfied)
     {
         std::cout << "\n=========== 新一轮轨迹调整开始 ===========\n";
+
         Dobot::CDescartesPoint firstPose{};
         firstPose.x = brushpointsoffset_ee_poses[0].x;
         firstPose.y = brushpointsoffset_ee_poses[0].y;
@@ -1189,38 +1832,6 @@ int main()
         std::cout << "本次循环偏移量: " << deltaOffset.transpose() << std::endl;
         std::cout << "历史总偏移量: " << totalDeltaOffset.transpose() << std::endl;
 
-        // 将偏移应用到tcp
-        // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-
-        modifyoffsetX += deltaOffset.x();
-        modifyoffsetY += deltaOffset.y();
-        modifyoffsetZ += deltaOffset.z();
-
-        // 将每次调整的坐标应用到tcp上去
-        // 转移到机械臂末端的误差
-        Vector3 vecA = {deltaOffset.x(), deltaOffset.y(), deltaOffset.z()};
-        double gxc, gyc, gzc, grxc, gryc, grzc;
-        while (!demo->getCurrentPose(0, 0, gxc, gyc, gzc, grxc, gryc, grzc))
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        std::cout << grxc << "," << gryc << "," << grzc << std::endl;
-        Vector3 vecB = transformVectorAToB(vecA, grxc, gryc, grzc);
-        std::cout << "向量在坐标系 B 下的值为：" << std::endl;
-
-        // 只修改变量，不立即写入文件
-        // offsetXs += vecB.x;
-        // offsetYs += vecB.y;
-        // offsetZs += vecB.z;
-
-        // offsetX += deltaOffset.x();
-        // offsetY += deltaOffset.y();
-        // offsetZ += deltaOffset.z();
-
-        // std::cout << "临时偏移量更新为：" << std::endl;
-        // std::cout << "Xc: " << offsetXs << "\nYc: " << offsetYs << "\nZc: " << offsetZs << std::endl;
-
-        // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
         // 更新所有轨迹点
         for (auto &p : brushpointsoffset_ee_poses)
         {
@@ -1251,44 +1862,18 @@ int main()
         params.freq = 0.2;
         demo->movsDemoC(descartesPoints, params);
 
-        {
-            Dobot::CDescartesPoint lifted = descartesPoints.back();
-            lifted.z += 100; // 基坐标系 Z 上抬 100mm
-            demo->moveRobotC(lifted, lifted);
-        }
-
         std::cout << "\n是否满意当前调整后的轨迹？(y/n): ";
         char choice;
         std::cin >> choice;
         std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+
+        demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
 
         if (choice == 'y' || choice == 'Y')
         {
             userSatisfied = true;
             std::cout << "调整完成 ✅\n";
             std::cout << "最终总偏移量: " << totalDeltaOffset.transpose() << std::endl;
-
-            json offsetJson;
-
-            offsetJson["brushxoffset"] = offsetX;
-            offsetJson["brushyoffset"] = offsetY;
-            offsetJson["brushzoffset"] = offsetZ;
-
-            offsetJson["brushxoffsetmodify"] = modifyoffsetX;
-            offsetJson["brushyoffsetmodify"] = modifyoffsetY;
-            offsetJson["brushzoffsetmodify"] = modifyoffsetZ;
-
-            std::ofstream outputFile(Brush_offset);
-            if (outputFile.is_open())
-            {
-                outputFile << offsetJson.dump(4);
-                outputFile.close();
-                std::cout << "偏移量已成功保存到文件：" << Brush_offset << std::endl;
-            }
-            else
-            {
-                std::cerr << "无法打开文件进行写入：" << Brush_offset << std::endl;
-            }
         }
         else
         {
@@ -1330,8 +1915,8 @@ int main()
     else
     {
         // ================= 模式1 / 模式3 精简自动流程 =================
-        const std::string Std_Traj_Json = "../defaultconfig/rightside/standard_trajectory.json";
-        const std::string Std_Traj_Json_NoComp = "../defaultconfig/rightside/standard_trajectory_nocomp.json";
+        const std::string Std_Traj_Json = "../defaultconfig/leftinside/standard_trajectory.json";
+        const std::string Std_Traj_Json_NoComp = "../defaultconfig/leftinside/standard_trajectory_nocomp.json";
 
         // ---- 加载已有牙刷偏移并设置TCP(不做TCP标定/不做牙刷微调) ----
         {
@@ -1349,16 +1934,9 @@ int main()
             double offsetYs = loadedJson.value("brushyoffsets", 0.0);
             double offsetZs = loadedJson.value("brushzoffsets", 0.0);
 
-            TcpXyz brushTcp = loadDefaultBrushTcp();
-
-
-            double tcpx = brushTcp.x;
-
-
-            double tcpy = brushTcp.y;
-
-
-            double tcpz = brushTcp.z;
+            double tcpx = -9.748236;
+            double tcpy = -186.312977;
+            double tcpz = 223.252632;
             std::string tcpvalue = "{" + std::to_string(tcpx) + "," +
                                    std::to_string(tcpy) + "," +
                                    std::to_string(tcpz) + ",0,0,0}";
@@ -1541,14 +2119,7 @@ int main()
             demo->moveRobotC(pointstart, pointstart);
             Eigen::Vector3d deltaOffset(0, 0, 0);
             demo->moveRobotC(firstPose, firstPose);
-            char tuneSel = 'k';
-            std::cout << "\n选择微调方式: k=键盘微调  d=拖拽微调，请输入后回车: ";
-            std::cin >> tuneSel;
-            std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
-            if (tuneSel == 'd' || tuneSel == 'D')
-                dragTuneXYZ(demo, firstPose, deltaOffset);
-            else
-                fineTuneXYZ(demo, firstPose, deltaOffset);
+            fineTuneXYZ(demo, firstPose, deltaOffset);
             for (auto &p : brushpointsoffset_ee_poses)
             {
                 p.x += deltaOffset.x();
@@ -1595,16 +2166,12 @@ int main()
             params.freq = 0.2;
             demo->movsDemoC(descartesPoints, params);
 
-            {
-                Dobot::CDescartesPoint lifted = descartesPoints.back();
-                lifted.z += 100; // 基坐标系 Z 上抬 100mm
-                demo->moveRobotC(lifted, lifted);
-            }
-
             std::cout << "\n是否满意当前调整后的轨迹？(y/n): ";
             char choice;
             std::cin >> choice;
             std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+
+            demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
 
             if (choice == 'y' || choice == 'Y')
             {
@@ -1786,8 +2353,8 @@ int main()
                 if (std::abs(err) <= 0.02)
                 {
                     converged = true;
-                    std::cout << "  proj 1= " << proj << std::endl;
                     forcerepaired << proj << std::endl;
+                    std::cout << "  proj 1= " << proj << std::endl;
                     break;
                 }
                 else if (err > 0.02)
@@ -1812,8 +2379,8 @@ int main()
                 if (std::abs(err) <= 0.02)
                 {
                     converged = true;
-                    std::cout << "  proj 2= " << proj << std::endl;
                     forcerepaired << proj << std::endl;
+                    std::cout << "  proj 2= " << proj << std::endl;
                     break;
                 }
                 else if (err > 0.02)
@@ -1865,6 +2432,10 @@ int main()
         return -1;
     }
     std::cout << "调整后的力控轨迹保存完毕 (" << descartesPointsforce.size() << " 点)" << std::endl;
+    demo->moveRobotC(pointsafe, pointsafe);
+    std::cout << "初始位：先上抬再旋转，前往轨迹起点..." << std::endl;
+    demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
+    demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
 
     Dobot::CDescartesPoint firstPosesk{};
     firstPosesk.x = descartesPointsforce[0].x;
@@ -1884,22 +2455,11 @@ int main()
     pointstartsk.rx = firstPosesk.rx;
     pointstartsk.ry = firstPosesk.ry;
     pointstartsk.rz = firstPosesk.rz;
-
-    if (!descartesPointsforce.empty())
-    {
-        Dobot::CDescartesPoint lifted = descartesPointsforce.back();
-        lifted.z += 100; // 基坐标系 Z 上抬 100mm
-        demo->moveRobotC(lifted, lifted);
-    }
-
-    demo->moveRobotC(pointsafe, pointsafe);
-    std::cout << "初始位：先上抬再旋转，前往轨迹起点..." << std::endl;
-    demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
-    demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
-
     demo->moveRobotC(pointstartsk, pointstartsk);
     demo->moveRobotC(firstPosesk, firstPosesk);
 
+    std::cout << "运行完整力控轨迹（每行一次movsDemoC）" << std::endl;
+    std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
     std::cout << "运行完整力控轨迹（每行一次movsDemoC）" << std::endl;
     std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
 
@@ -1909,6 +2469,99 @@ int main()
     params1.v = 80;
     params1.a = 80;
     params1.freq = 0.2;
+
+    // std::ifstream indexFile(indexFilePath);
+    // if (!indexFile.is_open())
+    // {
+    //     std::cerr << "无法打开索引文件: " << indexFilePath << std::endl;
+    //     return -1;
+    // }
+
+    // std::string line;
+    // int lineNumber = 0;
+    // while (std::getline(indexFile, line))
+    // {
+    //     lineNumber++;
+    //     std::istringstream iss(line);
+    //     int idx;
+    //     std::vector<Dobot::CDescartesPoint> selectedPoints;
+
+    //     while (iss >> idx)
+    //     {
+    //         if (idx >= 0 && idx < (int)descartesPointsforce.size())
+    //         {
+    //             selectedPoints.push_back(descartesPointsforce[idx]);
+    //         }
+    //         else
+    //         {
+    //             std::cerr << "\n第 " << lineNumber << " 行索引 " << idx << " 超出范围 (0-"
+    //                       << descartesPointsforce.size() - 1 << ")" << std::endl;
+    //         }
+    //     }
+
+    //     if (!selectedPoints.empty())
+    //     {
+    //         // 安全到达
+    //         selectedPoints[0].z += 10;
+    //         demo->moveRobotC(selectedPoints[0], selectedPoints[0]);
+    //         std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    //         Dobot::CDescartesPoint rotatetooljointjumps{};
+    //         rotatetooljointjumps.x = 0;
+    //         rotatetooljointjumps.y = 0;
+    //         rotatetooljointjumps.z = -10;
+    //         rotatetooljointjumps.rx = 0;
+    //         rotatetooljointjumps.ry = 0;
+    //         rotatetooljointjumps.rz = 0;
+    //         demo->RelMovJDemo(rotatetooljointjumps, 0, 5, 20, 50, 100);
+
+    //         selectedPoints[0].z -= 10;
+    //         demo->moveRobotC(selectedPoints[0], selectedPoints[0]);
+    //         std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    //         demo->movsDemoC(selectedPoints, params1);
+    //         std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    //         Dobot::CDescartesPoint rotatetooljointjumpss{};
+    //         rotatetooljointjumpss.x = -15;
+    //         rotatetooljointjumpss.y = 0;
+    //         rotatetooljointjumpss.z = 0;
+    //         rotatetooljointjumpss.rx = 0;
+    //         rotatetooljointjumpss.ry = 0;
+    //         rotatetooljointjumpss.rz = 0;
+    //         demo->RelMovJDemo(rotatetooljointjumpss, 0, 5, 20, 50, 100);
+
+    //         // 扶刷
+    //         // Dobot::CDescartesPoint rotatetooljoints{};
+    //         // rotatetooljoints.x = 0;
+    //         // rotatetooljoints.y = 0;
+    //         // rotatetooljoints.z = 12;
+    //         // rotatetooljoints.rx = 0;
+    //         // rotatetooljoints.ry = 0;
+    //         // rotatetooljoints.rz = 0;
+    //         // demo->RelMovJDemo(rotatetooljoints, 0, 3, 60, 80, 100);
+    //         // rotatetooljoints.z = 0;
+    //         // rotatetooljoints.ry = -10;
+    //         // demo->RelMovJDemo(rotatetooljoints, 0, 3, 60, 80, 100);
+    //         // demo->RelMovJDemo(rotatetooljoints, 0, 3, 60, 80, 100);
+    //         // demo->RelMovJDemo(rotatetooljoints, 0, 3, 60, 80, 100);
+    //         // demo->RelMovJDemo(rotatetooljoints, 0, 3, 60, 80, 100);
+    //         // rotatetooljoints.ry = 0;
+    //         // rotatetooljoints.x = -12;
+    //         // demo->RelMovJDemo(rotatetooljoints, 0, 3, 60, 80, 100);
+    //         // std::this_thread::sleep_for(std::chrono::seconds(2));
+    //     }
+
+    //     // 最后沿着切向走
+    //     Dobot::CDescartesPoint rotatetooljointleave{};
+    //     rotatetooljointleave.x = 0;
+    //     rotatetooljointleave.y = 10;
+    //     rotatetooljointleave.z = 0;
+    //     rotatetooljointleave.rx = 0;
+    //     rotatetooljointleave.ry = 0;
+    //     rotatetooljointleave.rz = 0;
+    //     demo->RelMovJDemo(rotatetooljointleave, 0, 5, 20, 50, 100);
+    // }
 
     std::ifstream indexFile(indexFilePath);
     if (!indexFile.is_open())
@@ -1954,20 +2607,20 @@ int main()
         if (!selectedPoints.empty())
         {
             // 安全到达
-            // selectedPoints[0].z += 10;
+            selectedPoints[0].z += 10;
             demo->moveRobotC(selectedPoints[0], selectedPoints[0]);
             // std::this_thread::sleep_for(std::chrono::seconds(1));
 
-            // Dobot::CDescartesPoint rotatetooljointjumps{};
-            // rotatetooljointjumps.x = 30;
-            // rotatetooljointjumps.y = 0;
-            // rotatetooljointjumps.z = -30;
-            // rotatetooljointjumps.rx = 0;
-            // rotatetooljointjumps.ry = 0;
-            // rotatetooljointjumps.rz = 0;
-            // demo->RelMovJDemo(rotatetooljointjumps, 0, 5, 20, 50, 100);
+            Dobot::CDescartesPoint rotatetooljointjumps{};
+            rotatetooljointjumps.x = 30;
+            rotatetooljointjumps.y = 0;
+            rotatetooljointjumps.z = -30;
+            rotatetooljointjumps.rx = 0;
+            rotatetooljointjumps.ry = 0;
+            rotatetooljointjumps.rz = 0;
+            demo->RelMovJDemo(rotatetooljointjumps, 0, 5, 20, 50, 100);
 
-            // selectedPoints[0].z -= 10;
+            selectedPoints[0].z -= 10;
             demo->moveRobotC(selectedPoints[0], selectedPoints[0]);
             // std::this_thread::sleep_for(std::chrono::seconds(1));
 
@@ -1978,49 +2631,59 @@ int main()
             if (!isLastLine)
             {
                 // 非最后一行：执行原来的向后移动
-                // Dobot::CDescartesPoint rotatetooljointjumpss{};
-                // rotatetooljointjumpss.x = -15;
-                // rotatetooljointjumpss.y = 0;
-                // rotatetooljointjumpss.z = 0;
-                // rotatetooljointjumpss.rx = 0;
-                // rotatetooljointjumpss.ry = 0;
-                // rotatetooljointjumpss.rz = 0;
-                // demo->RelMovJDemo(rotatetooljointjumpss, 0, 5, 20, 50, 100);
-                std::cout << "hello " << std::endl;
+                Dobot::CDescartesPoint rotatetooljointjumpss{};
+                rotatetooljointjumpss.x = -15;
+                rotatetooljointjumpss.y = 0;
+                rotatetooljointjumpss.z = 0;
+                rotatetooljointjumpss.rx = 0;
+                rotatetooljointjumpss.ry = 0;
+                rotatetooljointjumpss.rz = 0;
+                demo->RelMovJDemo(rotatetooljointjumpss, 0, 5, 20, 50, 100);
             }
             else
             {
-                // 最后一段：沿刷头 -Z 方向做笛卡尔抬离，安全离开牙面。
-                // 原先在末点做工具系关节相对运动(RelMovJ +Y20)，在轨迹末端容易触发关节限位/奇异，
-                // 导致机械臂报警、后续回安全点与浮刷流程被中断("挂掉")。
-                const Dobot::CDescartesPoint &lastPt = selectedPoints.back();
-                Eigen::Matrix3d rotLast = eulerDegToRotationMatrix(lastPt.rx, lastPt.ry, lastPt.rz);
-                Eigen::Vector3d brushDirLast = rotLast.col(2);
-                brushDirLast.normalize();
 
-                Dobot::CDescartesPoint leavePt = lastPt;
-                leavePt.x += -brushDirLast.x() * 20;
-                leavePt.y += -brushDirLast.y() * 20;
-                leavePt.z += -brushDirLast.z() * 20;
-                demo->moveRobotC(leavePt, leavePt);
+                Dobot::CDescartesPoint rotatetooljointleave{};
+                rotatetooljointleave.x = 0;
+                rotatetooljointleave.y = 20;
+                rotatetooljointleave.z = 0;
+                rotatetooljointleave.rx = 0;
+                rotatetooljointleave.ry = 0;
+                rotatetooljointleave.rz = 0;
+                demo->RelMovJDemo(rotatetooljointleave, 0, 5, 20, 50, 100);
             }
+
+            // Dobot::CDescartesPoint rotatetooljoints{};
+            // rotatetooljoints.x = 0;
+            // rotatetooljoints.y = 0;
+            // rotatetooljoints.z = 12;
+            // rotatetooljoints.rx = 0;
+            // rotatetooljoints.ry = 0;
+            // rotatetooljoints.rz = 0;
+            // demo->RelMovJDemo(rotatetooljoints, 0, 5, 60, 80, 100);
+            // rotatetooljoints.z = 0;
+            // rotatetooljoints.ry = -10;
+            // demo->RelMovJDemo(rotatetooljoints, 0, 5, 60, 80, 100);
+            // demo->RelMovJDemo(rotatetooljoints, 0, 5, 60, 80, 100);
+            // demo->RelMovJDemo(rotatetooljoints, 0, 5, 60, 80, 100);
+            // demo->RelMovJDemo(rotatetooljoints, 0, 5, 60, 80, 100);
+            // rotatetooljoints.ry = 0;
+            // rotatetooljoints.x = -12;
+            // demo->RelMovJDemo(rotatetooljoints, 0, 5, 60, 80, 100);
+            // std::this_thread::sleep_for(std::chrono::seconds(2));
         }
     }
 
-    // 走完完整轨迹后：沿机械臂基坐标系上抬80mm
-    {
-        double gx, gy, gz, grx, gry, grz;
-        while (!demo->getCurrentPose(0, 0, gx, gy, gz, grx, gry, grz))
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        Dobot::CDescartesPoint lifted{};
-        lifted.x = gx;
-        lifted.y = gy;
-        lifted.z = gz + 80; // 基坐标系 Z 上抬 80mm
-        lifted.rx = grx;
-        lifted.ry = gry;
-        lifted.rz = grz;
-        demo->moveRobotC(lifted, lifted);
-    }
+    // 基于当前点往上抬
+    Dobot::CDescartesPoint rotatetooljointup{};
+    rotatetooljointup.x = 0;
+    rotatetooljointup.y = 0;
+    rotatetooljointup.z = -60;
+    rotatetooljointup.rx = 0;
+    rotatetooljointup.ry = 0;
+    rotatetooljointup.rz = 0;
+
+    demo->RelMovJDemo(rotatetooljointup, 0, 0, 20, 50, 100);
 
     indexFile.close();
 
@@ -2079,14 +2742,14 @@ int main()
 
         std::cout << "--- 正在处理第 " << i + 1 << " 个任务，目标点 ID: " << currentTargetId << " ---" << std::endl;
 
-        descartesPointsforce[currentTargetId].z += 50;
+        descartesPointsforce[currentTargetId].z += 52;
         demo->moveRobotC(descartesPointsforce[currentTargetId], descartesPointsforce[currentTargetId]);
         // std::this_thread::sleep_for(std::chrono::seconds(1)); // 等待稳定
 
         Dobot::CDescartesPoint rotatetooljointjumps{};
-        rotatetooljointjumps.x = 10;
+        rotatetooljointjumps.x = 30;
         rotatetooljointjumps.y = 0;
-        rotatetooljointjumps.z = -38;
+        rotatetooljointjumps.z = -30;
         rotatetooljointjumps.rx = 0;
         rotatetooljointjumps.ry = 0;
         rotatetooljointjumps.rz = 0;
@@ -2114,20 +2777,11 @@ int main()
         // 如果读到最后一行，自动结束循环
         if (i == targetIds.size() - 1)
         {
-            double gx, gy, gz, grx, gry, grz;
-            while (!demo->getCurrentPose(0, 0, gx, gy, gz, grx, gry, grz))
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            Dobot::CDescartesPoint lifted{};
-            lifted.x = gx;
-            lifted.y = gy;
-            lifted.z = gz + 100; // 基坐标系 Z 上抬 100mm
-            lifted.rx = grx;
-            lifted.ry = gry;
-            lifted.rz = grz;
-            demo->moveRobotC(lifted, lifted);
             std::cout << "已完成最后一行索引，流程结束。" << std::endl;
         }
     }
+
+    demo->RelMovJDemo(rotatetooljointup, 0, 0, 20, 50, 100);
 
     // 退出
     demo->moveRobotC(pointsafe, pointsafe);

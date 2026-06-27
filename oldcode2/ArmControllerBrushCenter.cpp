@@ -62,65 +62,6 @@ Eigen::Vector3d getRotatedZAxisFromDegrees(double rx_deg, double ry_deg, double 
 }
 
 /* ======================= 键盘微调函数 ======================= */
-/* ======================= 拖拽微调函数 ======================= */
-void dragTuneXYZ(DobotTcpDemo *demo, Dobot::CDescartesPoint &curPose,
-                 Eigen::Vector3d &totalOffset)
-{
-    // 拖拽前记录刷尖(tool5)在base系的位置
-    double bx = 0, by = 0, bz = 0, brx = 0, bry = 0, brz = 0;
-    while (!demo->getCurrentPose(0, 5, bx, by, bz, brx, bry, brz))
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(300)); // 进入拖拽前等待到位稳定
-    demo->startDrag();
-    std::cout << "\n===== 拖拽微调模式(手动) =====\n"
-              << "机械臂已进入拖拽模式：请手动拖动机械臂，使刷尖到达目标位姿。\n"
-              << "(手动微调: 拖拽后将直接采用此刻的完整位姿 xyz + rx/ry/rz 作为新的固定姿态)\n"
-              << "完成后按 Enter 确认...\n";
-    while (true)
-    {
-        if (_kbhit())
-        {
-            if (_getch() == 13)
-                break;
-        }
-        Sleep(10);
-    }
-
-    // 拖拽后记录刷尖(tool5)在base系的位置(仅用于记录累计位移)
-    double ax = 0, ay = 0, az = 0, arx = 0, ary = 0, arz = 0;
-    while (!demo->getCurrentPose(0, 5, ax, ay, az, arx, ary, arz))
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    // 拖拽后记录法兰(tool0)在base系的完整位姿(xyz + rx/ry/rz)
-    double fx = 0, fy = 0, fz = 0, frx = 0, fry = 0, frz = 0;
-    while (!demo->getCurrentPose(0, 0, fx, fy, fz, frx, fry, frz))
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    demo->stopDrag();
-    std::this_thread::sleep_for(std::chrono::milliseconds(300)); // 等待退出拖拽模式稳定
-
-    // base系下刷尖位移，仅用于记录累计偏移
-    double dx = ax - bx;
-    double dy = ay - by;
-    double dz = az - bz;
-    totalOffset += Eigen::Vector3d(dx, dy, dz);
-
-    // 手动微调: 直接采用拖拽后的完整法兰位姿(含 rx/ry/rz)作为新的固定姿态
-    curPose.x = fx;
-    curPose.y = fy;
-    curPose.z = fz;
-    curPose.rx = frx;
-    curPose.ry = fry;
-    curPose.rz = frz;
-    demo->moveRobotC(curPose, curPose);
-
-    std::cout << "拖拽后法兰新固定位姿: x=" << fx << " y=" << fy << " z=" << fz
-              << " rx=" << frx << " ry=" << fry << " rz=" << frz << std::endl;
-    std::cout << "拖拽位移(刷尖, base系)[mm]: " << dx << ", " << dy << ", " << dz << std::endl;
-    std::cout << "累计偏移[mm]: " << totalOffset.transpose() << std::endl;
-}
-
 void fineTuneXYZ(DobotTcpDemo *demo, Dobot::CDescartesPoint &curPose,
                  Eigen::Vector3d &totalOffset)
 {
@@ -813,9 +754,9 @@ int main()
         double offsetYs = loadedJson.value("brushyoffsets", 0.0);
         double offsetZs = loadedJson.value("brushzoffsets", 0.0);
 
-        double tcpx = -9.352824;
-        double tcpy = -186.998296;
-        double tcpz = 224.724733;
+        double tcpx = -9.748236;
+        double tcpy = -186.312977;
+        double tcpz = 223.252632;
 
         std::string tcpvalue = "{" + std::to_string(tcpx) + "," +
                                std::to_string(tcpy) + "," +
@@ -881,9 +822,9 @@ int main()
 
         std::cout << "牙刷微調完成，偏移量已保存。" << std::endl;
 
-        double tcpx = -9.352824;
-        double tcpy = -186.998296;
-        double tcpz = 224.724733;
+        double tcpx = -9.748236;
+        double tcpy = -186.312977;
+        double tcpz = 223.252632;
         double tcprx = 0.0;
         double tcpry = 0.0;
         double tcprz = 0.0;
@@ -926,9 +867,9 @@ int main()
             double offsetYs = loadedJson.value("brushyoffsets", 0.0);
             double offsetZs = loadedJson.value("brushzoffsets", 0.0);
 
-            double tcpx = -9.352824;
-            double tcpy = -186.998296;
-            double tcpz = 224.724733;
+            double tcpx = -9.748236;
+            double tcpy = -186.312977;
+            double tcpz = 223.252632;
             double tcprx = 0.0;
             double tcpry = 0.0;
             double tcprz = 0.0;
@@ -1266,7 +1207,8 @@ int main()
         const std::string Std_Traj_Json_NoComp = "../defaultconfig/center/standard_trajectory_nocomp.json";
 
         // ---- 加载已有牙刷偏移并设置TCP(不做TCP标定/不做牙刷微调) ----
-        // 与 ArmControllerBrushUpRight 一致: TCP写死, 先设TCP再走安全点, pointa不叠加牙刷偏移
+        double offsetX = 0, offsetY = 0, offsetZ = 0;
+        double offsetXs = 0, offsetYs = 0, offsetZs = 0;
         {
             std::ifstream inputFile(Brush_offset);
             if (!inputFile.is_open())
@@ -1278,13 +1220,16 @@ int main()
             inputFile >> loadedJson;
             inputFile.close();
 
-            double offsetXs = loadedJson.value("brushxoffsets", 0.0);
-            double offsetYs = loadedJson.value("brushyoffsets", 0.0);
-            double offsetZs = loadedJson.value("brushzoffsets", 0.0);
+            offsetX = loadedJson.value("brushxoffset", 0.0);
+            offsetY = loadedJson.value("brushyoffset", 0.0);
+            offsetZ = loadedJson.value("brushzoffset", 0.0);
+            offsetXs = loadedJson.value("brushxoffsets", 0.0);
+            offsetYs = loadedJson.value("brushyoffsets", 0.0);
+            offsetZs = loadedJson.value("brushzoffsets", 0.0);
 
-            double tcpx = -9.352824;
-            double tcpy = -186.998296;
-            double tcpz = 224.724733;
+            double tcpx = -9.748236;
+            double tcpy = -186.312977;
+            double tcpz = 223.252632;
             std::string tcpvalue = "{" + std::to_string(tcpx) + "," +
                                    std::to_string(tcpy) + "," +
                                    std::to_string(tcpz) + ",0,0,0}";
@@ -1297,9 +1242,9 @@ int main()
         demo->moveRobotC(pointsafe, pointsafe);
 
         Dobot::CDescartesPoint pointa{};
-        pointa.x = 264.8929 + modifiedupx;
-        pointa.y = -285.1852 + modifiedupy;
-        pointa.z = 391.0669 + modifiedup + modifiedupz;
+        pointa.x = 264.8929 + modifiedupx + offsetX;
+        pointa.y = -285.1852 + modifiedupy + offsetY;
+        pointa.z = 391.0669 + modifiedup + modifiedupz + offsetZ;
         pointa.rx = -179.7725;
         pointa.ry = -1.3507;
         pointa.rz = -145.9055;
@@ -1445,14 +1390,7 @@ int main()
             std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
 
             Eigen::Vector3d deltaOffset(0, 0, 0);
-            char tuneSel = 'k';
-            std::cout << "\n选择微调方式: k=键盘微调  d=拖拽微调，请输入后回车: ";
-            std::cin >> tuneSel;
-            std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
-            if (tuneSel == 'd' || tuneSel == 'D')
-                dragTuneXYZ(demo, firstPose, deltaOffset);
-            else
-                fineTuneXYZ(demo, firstPose, deltaOffset);
+            fineTuneXYZ(demo, firstPose, deltaOffset);
 
             double diffx = firstPose.x - firstPose1.x;
             double diffy = firstPose.y - firstPose1.y;

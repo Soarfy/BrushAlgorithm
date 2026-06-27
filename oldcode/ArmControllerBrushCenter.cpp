@@ -62,65 +62,6 @@ Eigen::Vector3d getRotatedZAxisFromDegrees(double rx_deg, double ry_deg, double 
 }
 
 /* ======================= 键盘微调函数 ======================= */
-/* ======================= 拖拽微调函数 ======================= */
-void dragTuneXYZ(DobotTcpDemo *demo, Dobot::CDescartesPoint &curPose,
-                 Eigen::Vector3d &totalOffset)
-{
-    // 拖拽前记录刷尖(tool5)在base系的位置
-    double bx = 0, by = 0, bz = 0, brx = 0, bry = 0, brz = 0;
-    while (!demo->getCurrentPose(0, 5, bx, by, bz, brx, bry, brz))
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(300)); // 进入拖拽前等待到位稳定
-    demo->startDrag();
-    std::cout << "\n===== 拖拽微调模式(手动) =====\n"
-              << "机械臂已进入拖拽模式：请手动拖动机械臂，使刷尖到达目标位姿。\n"
-              << "(手动微调: 拖拽后将直接采用此刻的完整位姿 xyz + rx/ry/rz 作为新的固定姿态)\n"
-              << "完成后按 Enter 确认...\n";
-    while (true)
-    {
-        if (_kbhit())
-        {
-            if (_getch() == 13)
-                break;
-        }
-        Sleep(10);
-    }
-
-    // 拖拽后记录刷尖(tool5)在base系的位置(仅用于记录累计位移)
-    double ax = 0, ay = 0, az = 0, arx = 0, ary = 0, arz = 0;
-    while (!demo->getCurrentPose(0, 5, ax, ay, az, arx, ary, arz))
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    // 拖拽后记录法兰(tool0)在base系的完整位姿(xyz + rx/ry/rz)
-    double fx = 0, fy = 0, fz = 0, frx = 0, fry = 0, frz = 0;
-    while (!demo->getCurrentPose(0, 0, fx, fy, fz, frx, fry, frz))
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    demo->stopDrag();
-    std::this_thread::sleep_for(std::chrono::milliseconds(300)); // 等待退出拖拽模式稳定
-
-    // base系下刷尖位移，仅用于记录累计偏移
-    double dx = ax - bx;
-    double dy = ay - by;
-    double dz = az - bz;
-    totalOffset += Eigen::Vector3d(dx, dy, dz);
-
-    // 手动微调: 直接采用拖拽后的完整法兰位姿(含 rx/ry/rz)作为新的固定姿态
-    curPose.x = fx;
-    curPose.y = fy;
-    curPose.z = fz;
-    curPose.rx = frx;
-    curPose.ry = fry;
-    curPose.rz = frz;
-    demo->moveRobotC(curPose, curPose);
-
-    std::cout << "拖拽后法兰新固定位姿: x=" << fx << " y=" << fy << " z=" << fz
-              << " rx=" << frx << " ry=" << fry << " rz=" << frz << std::endl;
-    std::cout << "拖拽位移(刷尖, base系)[mm]: " << dx << ", " << dy << ", " << dz << std::endl;
-    std::cout << "累计偏移[mm]: " << totalOffset.transpose() << std::endl;
-}
-
 void fineTuneXYZ(DobotTcpDemo *demo, Dobot::CDescartesPoint &curPose,
                  Eigen::Vector3d &totalOffset)
 {
@@ -549,73 +490,6 @@ Vector3 transformVectorAToB(Vector3 vA, double rx, double ry, double rz)
     return vB;
 }
 
-/* ======================= 运行模式 ======================= */
-// 1=基础轨迹配置模式  2=随机模式(保留全部交互)  3=轨迹复用模式
-struct ModePlan
-{
-    int mode = 2;
-    bool gotoCalib = false;
-    bool generateNew = false;
-    bool saveStdJson = false;
-};
-
-static ModePlan makePlan(int mode)
-{
-    ModePlan p;
-    p.mode = mode;
-    if (mode == 1)
-    {
-        p.gotoCalib = true;
-        p.generateNew = true;
-        p.saveStdJson = true;
-    }
-    else if (mode == 3)
-    {
-        p.gotoCalib = true;
-        p.generateNew = false;
-        p.saveStdJson = false;
-    }
-    return p;
-}
-
-static bool saveStandardTrajectoryJson(const std::string &path, const std::vector<PointData> &pts)
-{
-    json j = json::array();
-    for (const auto &p : pts)
-    {
-        j.push_back({{"x", p.x}, {"y", p.y}, {"z", p.z}, {"a", p.a}, {"b", p.b}, {"c", p.c}});
-    }
-    std::ofstream f(path);
-    if (!f.is_open())
-        return false;
-    f << j.dump(4);
-    f.close();
-    return true;
-}
-
-static bool loadStandardTrajectoryJson(const std::string &path, std::vector<PointData> &pts)
-{
-    std::ifstream f(path);
-    if (!f.is_open())
-        return false;
-    json j;
-    f >> j;
-    f.close();
-    pts.clear();
-    for (const auto &e : j)
-    {
-        PointData p{};
-        p.x = e.at("x").get<double>();
-        p.y = e.at("y").get<double>();
-        p.z = e.at("z").get<double>();
-        p.a = e.at("a").get<double>();
-        p.b = e.at("b").get<double>();
-        p.c = e.at("c").get<double>();
-        pts.push_back(p);
-    }
-    return true;
-}
-
 // 簡單做法是修改初始姿態，然後再改刷牙方式即可
 int main()
 {
@@ -757,25 +631,11 @@ int main()
     startfirst.rz = -145.9050;
     demo->moveRobotC(startfirst, startfirst);
 
-    std::cout << "\n=========== 运行模式选择 ===========\n"
-              << "1 = 基础轨迹配置模式 (到位不标定 / 不微调牙刷 / 生成新标准轨迹并存json / 微调+力控)\n"
-              << "2 = 随机模式 (保留全部交互提示, 原始流程)\n"
-              << "3 = 轨迹复用模式 (到位不标定 / 复用模式1的json标准轨迹 / 微调+力控)\n"
-              << "请选择(1/2/3): ";
-    int mode = 2;
-    std::cin >> mode;
-    if (std::cin.fail())
-    {
-        std::cin.clear();
-        std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
-    }
-    if (mode != 1 && mode != 2 && mode != 3)
-    {
-        std::cout << "无效模式输入, 默认使用 2 (随机模式)\n";
-        mode = 2;
-    }
-    ModePlan plan = makePlan(mode);
-    std::cout << "已选择运行模式: " << mode << std::endl;
+    std::cout << "是否使用原有轨迹直接进行力控调整？(y/n): ";
+    char useExistingTrajChoice;
+    std::cin >> useExistingTrajChoice;
+    const bool useExistingTrajectoryForForce =
+        (useExistingTrajChoice == 'y' || useExistingTrajChoice == 'Y');
 
     std::vector<PointData> brushpointsoffset_ee_poses;
 
@@ -786,14 +646,6 @@ int main()
     pointsafe.rx = -179.7725;
     pointsafe.ry = -1.3507;
     pointsafe.rz = -145.9055;
-
-    if (mode == 2)
-    {
-    std::cout << "是否使用原有轨迹直接进行力控调整？(y/n): ";
-    char useExistingTrajChoice;
-    std::cin >> useExistingTrajChoice;
-    const bool useExistingTrajectoryForForce =
-        (useExistingTrajChoice == 'y' || useExistingTrajChoice == 'Y');
 
     if (useExistingTrajectoryForForce)
     {
@@ -813,9 +665,9 @@ int main()
         double offsetYs = loadedJson.value("brushyoffsets", 0.0);
         double offsetZs = loadedJson.value("brushzoffsets", 0.0);
 
-        double tcpx = -9.352824;
-        double tcpy = -186.998296;
-        double tcpz = 224.724733;
+        double tcpx = -9.748236 - offsetXs;
+        double tcpy = -186.312977 - offsetYs;
+        double tcpz = 223.252632 - offsetZs;
 
         std::string tcpvalue = "{" + std::to_string(tcpx) + "," +
                                std::to_string(tcpy) + "," +
@@ -881,9 +733,9 @@ int main()
 
         std::cout << "牙刷微調完成，偏移量已保存。" << std::endl;
 
-        double tcpx = -9.352824;
-        double tcpy = -186.998296;
-        double tcpz = 224.724733;
+        double tcpx = -9.748236 - vecB.x;
+        double tcpy = -186.312977 - vecB.y;
+        double tcpz = 223.252632 - vecB.z;
         double tcprx = 0.0;
         double tcpry = 0.0;
         double tcprz = 0.0;
@@ -926,9 +778,9 @@ int main()
             double offsetYs = loadedJson.value("brushyoffsets", 0.0);
             double offsetZs = loadedJson.value("brushzoffsets", 0.0);
 
-            double tcpx = -9.352824;
-            double tcpy = -186.998296;
-            double tcpz = 224.724733;
+            double tcpx = -9.748236 - offsetXs;
+            double tcpy = -186.312977 - offsetYs;
+            double tcpz = 223.252632 - offsetZs;
             double tcprx = 0.0;
             double tcpry = 0.0;
             double tcprz = 0.0;
@@ -1257,297 +1109,6 @@ int main()
     std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
 
     } // useExistingTrajectoryForForce
-    } // if (mode == 2)
-    else
-    {
-        // ================= 模式1 / 模式3 精简自动流程 =================
-        // 说明: center 轨迹具有特殊性, 其标准轨迹为"模式1下微调好且未加力控"的轨迹, 存为 json
-        const std::string Std_Traj_Json = "../defaultconfig/center/standard_trajectory.json";
-        const std::string Std_Traj_Json_NoComp = "../defaultconfig/center/standard_trajectory_nocomp.json";
-
-        // ---- 加载已有牙刷偏移并设置TCP(不做TCP标定/不做牙刷微调) ----
-        // 与 ArmControllerBrushUpRight 一致: TCP写死, 先设TCP再走安全点, pointa不叠加牙刷偏移
-        {
-            std::ifstream inputFile(Brush_offset);
-            if (!inputFile.is_open())
-            {
-                std::cerr << "无法打开牙刷偏移文件: " << Brush_offset << std::endl;
-                return -1;
-            }
-            json loadedJson;
-            inputFile >> loadedJson;
-            inputFile.close();
-
-            double offsetXs = loadedJson.value("brushxoffsets", 0.0);
-            double offsetYs = loadedJson.value("brushyoffsets", 0.0);
-            double offsetZs = loadedJson.value("brushzoffsets", 0.0);
-
-            double tcpx = -9.352824;
-            double tcpy = -186.998296;
-            double tcpz = 224.724733;
-            std::string tcpvalue = "{" + std::to_string(tcpx) + "," +
-                                   std::to_string(tcpy) + "," +
-                                   std::to_string(tcpz) + ",0,0,0}";
-            demo->setToolDemo(5, tcpvalue);
-            std::cout << "[模式" << mode << "] 已加载牙刷偏移并设置TCP: " << tcpvalue << std::endl;
-        }
-
-        std::cout << "[模式" << mode << "] 前往工作位置(不做TCP标定), 注意安全..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-        demo->moveRobotC(pointsafe, pointsafe);
-
-        Dobot::CDescartesPoint pointa{};
-        pointa.x = 264.8929 + modifiedupx;
-        pointa.y = -285.1852 + modifiedupy;
-        pointa.z = 391.0669 + modifiedup + modifiedupz;
-        pointa.rx = -179.7725;
-        pointa.ry = -1.3507;
-        pointa.rz = -145.9055;
-        demo->moveRobotC(pointa, pointa);
-
-        if (plan.generateNew)
-        {
-            // ---- 模式1: 生成新标准轨迹 ----
-            std::cout << "[模式1] 生成新轨迹..." << std::endl;
-            int rc = std::system(command1.c_str());
-            if (rc != 0)
-            {
-                std::cout << "[模式1] 新轨迹生成失败！" << std::endl;
-                return -1;
-            }
-            std::cout << "[模式1] 新轨迹生成成功！" << std::endl;
-
-            // ---- 模式1: 牙刷初始姿态调整(自动, 去Enter, 加延时+提示) ----
-            std::cout << "[模式1] 牙刷初始姿态调整(自动), 即将上抬并旋转, 注意安全..." << std::endl;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-            demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
-            demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
-            std::cout << "[模式1] 牙刷初始姿态已调整, 即将记录位姿..." << std::endl;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-
-            // ---- 记录当前位姿(GetPose) ----
-            double gx, gy, gz, grx, gry, grz;
-            while (true)
-            {
-                if (demo->getCurrentPose(0, 0, gx, gy, gz, grx, gry, grz) &&
-                    !std::isnan(gx) && !std::isnan(gy) && !std::isnan(gz) &&
-                    !std::isnan(grx) && !std::isnan(gry) && !std::isnan(grz))
-                {
-                    if (poseFile.is_open())
-                    {
-                        poseFile << gx << " " << gy << " " << gz << " "
-                                 << grx << " " << gry << " " << grz << std::endl;
-                        poseFile.close();
-                        std::cout << "[模式1] 当前刷头位置已保存\n";
-                    }
-                    else
-                    {
-                        std::cerr << "[模式1] 当前刷头位置保存失败\n";
-                    }
-                    break;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(60));
-            }
-
-            std::cout << "[模式1] 将轨迹转换到机械臂末端..." << std::endl;
-            std::system(command3.c_str());
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-            backupForceTrajectoryFile(Force_FILE_PATH);
-            if (!loadForceTrajectoryFile(eepath, brushpointsoffset_ee_poses))
-            {
-                std::cerr << "无法加载新生成轨迹: " << eepath << std::endl;
-                return -1;
-            }
-        }
-        else
-        {
-            // ---- 模式3: 复用模式1保存的 json 标准轨迹 ----
-            std::cout << "[模式3] 选择复用的标准轨迹: 1=有补偿(微调后)  2=无补偿(原始未微调)\n请选择(1/2): ";
-            int stdTrajSel = 1;
-            std::cin >> stdTrajSel;
-            if (std::cin.fail())
-            {
-                std::cin.clear();
-                std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
-            }
-            const std::string chosenStdTraj = (stdTrajSel == 2) ? Std_Traj_Json_NoComp : Std_Traj_Json;
-            std::cout << "[模式3] 复用标准轨迹(json): " << chosenStdTraj << std::endl;
-            if (!loadStandardTrajectoryJson(chosenStdTraj, brushpointsoffset_ee_poses))
-            {
-                std::cerr << "无法加载标准轨迹json(请先用模式1生成): " << chosenStdTraj << std::endl;
-                return -1;
-            }
-            backupForceTrajectoryFile(Force_FILE_PATH);
-            indexFilePath = oldsegment;
-        }
-
-        std::cout << "已加载轨迹 " << brushpointsoffset_ee_poses.size() << " 点" << std::endl;
-        if (brushpointsoffset_ee_poses.empty())
-        {
-            std::cerr << "轨迹为空！" << std::endl;
-            return -1;
-        }
-
-        // ---- 模式1: 保存"无补偿"(原始未微调)标准轨迹为 json ----
-        if (plan.saveStdJson)
-        {
-            if (saveStandardTrajectoryJson(Std_Traj_Json_NoComp, brushpointsoffset_ee_poses))
-                std::cout << "[模式1] 无补偿标准轨迹(原始未微调)已保存为json: " << Std_Traj_Json_NoComp
-                          << " (" << brushpointsoffset_ee_poses.size() << " 点)" << std::endl;
-            else
-                std::cerr << "[模式1] 无补偿标准轨迹json保存失败: " << Std_Traj_Json_NoComp << std::endl;
-        }
-
-        // ---- 轨迹微调循环(模式1/3都做) ----
-        bool userSatisfied = false;
-        while (!userSatisfied)
-        {
-            std::cout << "\n=========== 新一轮轨迹调整开始 ===========\n";
-
-            Dobot::CDescartesPoint firstPose{};
-            firstPose.x = brushpointsoffset_ee_poses[0].x;
-            firstPose.y = brushpointsoffset_ee_poses[0].y;
-            firstPose.z = brushpointsoffset_ee_poses[0].z;
-            firstPose.rx = brushpointsoffset_ee_poses[0].a;
-            firstPose.ry = brushpointsoffset_ee_poses[0].b;
-            firstPose.rz = brushpointsoffset_ee_poses[0].c;
-
-            Dobot::CDescartesPoint firstPose1{};
-            firstPose1.x = brushpointsoffset_ee_poses[0].x;
-            firstPose1.y = brushpointsoffset_ee_poses[0].y;
-            firstPose1.z = brushpointsoffset_ee_poses[0].z;
-            firstPose1.rx = brushpointsoffset_ee_poses[0].a;
-            firstPose1.ry = brushpointsoffset_ee_poses[0].b;
-            firstPose1.rz = brushpointsoffset_ee_poses[0].c;
-
-            demo->moveRobotC(pointsafe, pointsafe);
-            std::cout << "初始位：先上抬再旋转，前往轨迹起点..." << std::endl;
-            demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
-            demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
-
-            Eigen::Matrix3d rotationMatrixs = eulerDegToRotationMatrix(firstPose.rx, firstPose.ry, firstPose.rz);
-            Eigen::Vector3d brushDirs = rotationMatrixs.col(2);
-            brushDirs.normalize();
-
-            Dobot::CDescartesPoint pointstart{};
-            pointstart.x = firstPose.x + -brushDirs.x() * 8;
-            pointstart.y = firstPose.y + -brushDirs.y() * 8;
-            pointstart.z = firstPose.z + -brushDirs.z() * 8;
-            pointstart.rx = firstPose.rx;
-            pointstart.ry = firstPose.ry;
-            pointstart.rz = firstPose.rz;
-            demo->moveRobotC(pointstart, pointstart);
-
-            demo->moveRobotC(firstPose, firstPose);
-
-            std::cout << "机械臂到达起始点，请确认按Enter" << std::endl;
-            std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
-
-            Eigen::Vector3d deltaOffset(0, 0, 0);
-            char tuneSel = 'k';
-            std::cout << "\n选择微调方式: k=键盘微调  d=拖拽微调，请输入后回车: ";
-            std::cin >> tuneSel;
-            std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
-            if (tuneSel == 'd' || tuneSel == 'D')
-                dragTuneXYZ(demo, firstPose, deltaOffset);
-            else
-                fineTuneXYZ(demo, firstPose, deltaOffset);
-
-            double diffx = firstPose.x - firstPose1.x;
-            double diffy = firstPose.y - firstPose1.y;
-            double diffz = firstPose.z - firstPose1.z;
-            double diffrx = firstPose.rx;
-            double diffry = firstPose.ry;
-            double diffrz = firstPose.rz;
-
-            for (auto &p : brushpointsoffset_ee_poses)
-            {
-                p.x += diffx;
-                p.y += diffy;
-                p.z += diffz;
-                p.a = diffrx;
-                p.b = diffry;
-                p.c = diffrz;
-            }
-
-            std::vector<Dobot::CDescartesPoint> descartesPoints;
-            for (const auto &p : brushpointsoffset_ee_poses)
-            {
-                Dobot::CDescartesPoint cp{};
-                cp.x = p.x;
-                cp.y = p.y;
-                cp.z = p.z;
-                cp.rx = p.a;
-                cp.ry = p.b;
-                cp.rz = p.c;
-                descartesPoints.push_back(cp);
-            }
-
-            Dobot::MovSParams params;
-            params.tool = 0;
-            params.user = 0;
-            params.v = 80;
-            params.a = 80;
-            params.freq = 0.2;
-            demo->movsDemoC(descartesPoints, params);
-
-            std::cout << "\n是否满意当前调整后的轨迹？(y/n): ";
-            char choice;
-            std::cin >> choice;
-            std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
-
-            if (choice == 'y' || choice == 'Y')
-            {
-                userSatisfied = true;
-                std::cout << "调整完成 ✅\n";
-            }
-            else
-            {
-                std::cout << "继续调整...\n";
-            }
-        }
-
-        // ---- 模式1: 保存"调整好且未加力控"的标准轨迹为 json (供模式3复用) ----
-        if (plan.saveStdJson)
-        {
-            if (saveStandardTrajectoryJson(Std_Traj_Json, brushpointsoffset_ee_poses))
-            {
-                std::cout << "[模式1] 标准轨迹(未加力控)已保存为json: " << Std_Traj_Json
-                          << " (" << brushpointsoffset_ee_poses.size() << " 点)" << std::endl;
-            }
-            else
-            {
-                std::cerr << "[模式1] 标准轨迹json保存失败: " << Std_Traj_Json << std::endl;
-            }
-        }
-
-        // ---- 微调结束回到安全点 ----
-        demo->moveRobotC(pointsafe, pointsafe);
-        std::cout << "初始位：先上抬再旋转..." << std::endl;
-        demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
-        demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
-
-        Dobot::CDescartesPoint firstPoses{};
-        firstPoses.x = brushpointsoffset_ee_poses[0].x;
-        firstPoses.y = brushpointsoffset_ee_poses[0].y;
-        firstPoses.z = brushpointsoffset_ee_poses[0].z;
-        firstPoses.rx = brushpointsoffset_ee_poses[0].a;
-        firstPoses.ry = brushpointsoffset_ee_poses[0].b;
-        firstPoses.rz = brushpointsoffset_ee_poses[0].c;
-        Eigen::Matrix3d rotationMatrixss = eulerDegToRotationMatrix(firstPoses.rx, firstPoses.ry, firstPoses.rz);
-        Eigen::Vector3d brushDirss = rotationMatrixss.col(2);
-        brushDirss.normalize();
-
-        Dobot::CDescartesPoint pointstarts{};
-        pointstarts.x = firstPoses.x + -brushDirss.x() * 8;
-        pointstarts.y = firstPoses.y + -brushDirss.y() * 8;
-        pointstarts.z = firstPoses.z + -brushDirss.z() * 8;
-        pointstarts.rx = firstPoses.rx;
-        pointstarts.ry = firstPoses.ry;
-        pointstarts.rz = firstPoses.rz;
-        demo->moveRobotC(pointstarts, pointstarts);
-    } // mode 1/3
 
     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@添加力控@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
     double targetforcevalue = pressureParameter;
