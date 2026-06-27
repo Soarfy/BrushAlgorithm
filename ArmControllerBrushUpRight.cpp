@@ -14,6 +14,7 @@
 #include <chrono>
 #include <functional>
 #include "DobotTcpDemo.h"
+#include "TcpConfigHelper.h"
 #include <windows.h>
 #include "kw-lib-all.h"
 #include <string>
@@ -66,6 +67,59 @@ Eigen::Vector3d getRotatedZAxisFromDegrees(double rx_deg, double ry_deg, double 
 }
 
 /* ======================= 键盘微调函数 ======================= */
+/* ======================= 拖拽微调函数 ======================= */
+void dragTuneXYZ(DobotTcpDemo *demo, Dobot::CDescartesPoint &curPose,
+                 Eigen::Vector3d &totalOffset)
+{
+    // 拖拽前记录刷尖(tool5)在base系的位置
+    double bx = 0, by = 0, bz = 0, brx = 0, bry = 0, brz = 0;
+    while (!demo->getCurrentPose(0, 5, bx, by, bz, brx, bry, brz))
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300)); // 进入拖拽前等待到位稳定
+    demo->startDrag();
+    std::cout << "\n===== 拖拽微调模式 =====\n"
+              << "机械臂已进入拖拽模式：请手动拖动机械臂，使刷尖到达目标位置。\n"
+              << "(拖拽时姿态rx/ry/rz会变化，确认后会自动恢复为原始姿态，仅采用xyz位移)\n"
+              << "完成后按 Enter 确认...\n";
+    while (true)
+    {
+        if (_kbhit())
+        {
+            if (_getch() == 13)
+                break;
+        }
+        Sleep(10);
+    }
+
+    // 拖拽后记录刷尖(tool5)在base系的位置
+    double ax = 0, ay = 0, az = 0, arx = 0, ary = 0, arz = 0;
+    while (!demo->getCurrentPose(0, 5, ax, ay, az, arx, ary, arz))
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    demo->stopDrag();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300)); // 等待退出拖拽模式稳定
+
+    // base系下刷尖位移 = 需要施加到法兰轨迹点上的偏移(平移与姿态无关)
+    double dx = ax - bx;
+    double dy = ay - by;
+    double dz = az - bz;
+    totalOffset += Eigen::Vector3d(dx, dy, dz);
+
+    // 恢复原始姿态、采用拖拽后的xyz：对法兰点做相同的base系平移
+    curPose.x += dx;
+    curPose.y += dy;
+    curPose.z += dz;
+    demo->moveRobotC(curPose, curPose);
+
+    Dobot::CDescartesPoint lifted = curPose;
+    lifted.z += 100; // 基坐标系 Z 上抬 100mm
+    demo->moveRobotC(lifted, lifted);
+
+    std::cout << "拖拽位移(刷尖, base系)[mm]: " << dx << ", " << dy << ", " << dz << std::endl;
+    std::cout << "累计偏移[mm]: " << totalOffset.transpose() << std::endl;
+}
+
 void fineTuneXYZ(DobotTcpDemo *demo, Dobot::CDescartesPoint &curPose,
                  Eigen::Vector3d &totalOffset)
 {
@@ -510,10 +564,6 @@ void saveRotationOffsetEntry(json &rotationJson, const std::string &key, const E
     rotationJson[key]["z"] = offset.z();
 }
 
-constexpr double kTcpBaselineX = -9.748236;
-constexpr double kTcpBaselineY = -186.312977;
-constexpr double kTcpBaselineZ = 223.252632;
-
 // Dobot GetPose: 位置 mm，Rx/Ry/Rz 为角度 °，Z-Y-X（与 transformVectorAToB 一致）
 Eigen::Matrix3d dobotPoseToRotationMatrixDeg(double rx_deg, double ry_deg, double rz_deg)
 {
@@ -563,7 +613,8 @@ bool computeFourPointTcp(const std::vector<FourPointTcpSample> &samples,
         return false;
     }
 
-    const Eigen::Vector3d tcpBootstrap(kTcpBaselineX, kTcpBaselineY, kTcpBaselineZ);
+    const TcpXyz baseline = loadDefaultBrushTcp();
+    const Eigen::Vector3d tcpBootstrap(baseline.x, baseline.y, baseline.z);
 
     Eigen::Vector3d contactPoint = Eigen::Vector3d::Zero();
     for (const auto &s : samples)
@@ -752,13 +803,15 @@ void printFourPointTcpReport(const std::vector<FourPointTcpSample> &samples,
     std::cout << "  Z: " << tcpFlange.z() << "\n";
     std::cout << "  各姿态反算标准差: " << result.tcpStdDevMm.transpose() << " mm\n";
 
+    const TcpXyz baseline = loadDefaultBrushTcp();
+
     std::cout << "\n--- 当前 baseline TCP ---\n";
-    std::cout << "  {" << kTcpBaselineX << ", " << kTcpBaselineY << ", " << kTcpBaselineZ << ", 0, 0, 0}\n";
+    std::cout << "  {" << baseline.x << ", " << baseline.y << ", " << baseline.z << ", 0, 0, 0}\n";
 
     std::cout << "\n--- 与 baseline 的差值 (计算值 - baseline) ---\n";
-    std::cout << "  dX: " << (tcpFlange.x() - kTcpBaselineX)
-              << "  dY: " << (tcpFlange.y() - kTcpBaselineY)
-              << "  dZ: " << (tcpFlange.z() - kTcpBaselineZ) << "\n";
+    std::cout << "  dX: " << (tcpFlange.x() - baseline.x)
+              << "  dY: " << (tcpFlange.y() - baseline.y)
+              << "  dZ: " << (tcpFlange.z() - baseline.z) << "\n";
 
     std::cout << "\n--- 将写入 setTool(5) ---\n";
     std::cout << "  {" << tcpFlange.x() << ", " << tcpFlange.y() << ", "
@@ -794,9 +847,10 @@ bool applyAndSaveFourPointTcp(DobotTcpDemo *demo,
         inFile.close();
     }
 
-    const double offsetXs = kTcpBaselineX - result.tcpFlange.x();
-    const double offsetYs = kTcpBaselineY - result.tcpFlange.y();
-    const double offsetZs = kTcpBaselineZ - result.tcpFlange.z();
+    const TcpXyz baseline = loadDefaultBrushTcp();
+    const double offsetXs = baseline.x - result.tcpFlange.x();
+    const double offsetYs = baseline.y - result.tcpFlange.y();
+    const double offsetZs = baseline.z - result.tcpFlange.z();
 
     offsetJson["brushxoffsets"] = offsetXs;
     offsetJson["brushyoffsets"] = offsetYs;
@@ -1165,9 +1219,16 @@ int main()
         double offsetYs = loadedJson.value("brushyoffsets", 0.0);
         double offsetZs = loadedJson.value("brushzoffsets", 0.0);
 
-        double tcpx = -9.748236;
-        double tcpy = -186.312977;
-        double tcpz = 223.252632;
+        TcpXyz brushTcp = loadDefaultBrushTcp();
+
+
+        double tcpx = brushTcp.x;
+
+
+        double tcpy = brushTcp.y;
+
+
+        double tcpz = brushTcp.z;
 
         std::string tcpvalue = "{" + std::to_string(tcpx) + "," +
                                std::to_string(tcpy) + "," +
@@ -1225,7 +1286,9 @@ int main()
             std::cin >> userInputRotationCalibrate;
             if (userInputRotationCalibrate == 'y' || userInputRotationCalibrate == 'Y')
             {
-                std::string tcpBaseline = "{-9.748236,-186.312977,223.252632,0,0,0}";
+                const TcpXyz brushTcpBaseline = loadDefaultBrushTcp();
+                std::string tcpBaseline = makeTcpValueString(
+                    brushTcpBaseline.x, brushTcpBaseline.y, brushTcpBaseline.z);
                 demo->setToolDemo(5, tcpBaseline);
 
                 Dobot::CDescartesPoint uprightRot{};
@@ -1383,9 +1446,16 @@ int main()
 
         std::cout << "牙刷微調完成，偏移量已保存。" << std::endl;
 
-        double tcpx = -9.748236;
-        double tcpy = -186.312977;
-        double tcpz = 223.252632;
+        TcpXyz brushTcp = loadDefaultBrushTcp();
+
+
+        double tcpx = brushTcp.x;
+
+
+        double tcpy = brushTcp.y;
+
+
+        double tcpz = brushTcp.z;
         double tcprx = 0.0;
         double tcpry = 0.0;
         double tcprz = 0.0;
@@ -1428,9 +1498,16 @@ int main()
             pointa.rz = -145.9055;
             demo->moveRobotC(pointa, pointa);
 
-            double tcpx = -9.748236;
-            double tcpy = -186.312977;
-            double tcpz = 223.252632;
+            TcpXyz brushTcp = loadDefaultBrushTcp();
+
+
+            double tcpx = brushTcp.x;
+
+
+            double tcpy = brushTcp.y;
+
+
+            double tcpz = brushTcp.z;
             double tcprx = 0.0;
             double tcpry = 0.0;
             double tcprz = 0.0;
@@ -1829,9 +1906,16 @@ int main()
             double offsetYs = loadedJson.value("brushyoffsets", 0.0);
             double offsetZs = loadedJson.value("brushzoffsets", 0.0);
 
-            double tcpx = -9.748236;
-            double tcpy = -186.312977;
-            double tcpz = 223.252632;
+            TcpXyz brushTcp = loadDefaultBrushTcp();
+
+
+            double tcpx = brushTcp.x;
+
+
+            double tcpy = brushTcp.y;
+
+
+            double tcpz = brushTcp.z;
             std::string tcpvalue = "{" + std::to_string(tcpx) + "," +
                                    std::to_string(tcpy) + "," +
                                    std::to_string(tcpz) + ",0,0,0}";
@@ -2015,7 +2099,14 @@ int main()
             demo->moveRobotC(pointstart, pointstart);
             Eigen::Vector3d deltaOffset(0, 0, 0);
             demo->moveRobotC(firstPose, firstPose);
-            fineTuneXYZ(demo, firstPose, deltaOffset);
+            char tuneSel = 'k';
+            std::cout << "\n选择微调方式: k=键盘微调  d=拖拽微调，请输入后回车: ";
+            std::cin >> tuneSel;
+            std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+            if (tuneSel == 'd' || tuneSel == 'D')
+                dragTuneXYZ(demo, firstPose, deltaOffset);
+            else
+                fineTuneXYZ(demo, firstPose, deltaOffset);
             for (auto &p : brushpointsoffset_ee_poses)
             {
                 p.x += deltaOffset.x();
