@@ -1797,15 +1797,19 @@ int main()
             }
             else
             {
+                // 最后一段：沿刷头 -Z 方向做笛卡尔抬离，安全离开牙面。
+                // 原先在末点做工具系关节相对运动(RelMovJ +Y20)，在轨迹末端容易触发关节限位/奇异，
+                // 导致机械臂报警、后续回安全点与浮刷流程被中断("挂掉")。
+                const Dobot::CDescartesPoint &lastPt = selectedPoints.back();
+                Eigen::Matrix3d rotLast = eulerDegToRotationMatrix(lastPt.rx, lastPt.ry, lastPt.rz);
+                Eigen::Vector3d brushDirLast = rotLast.col(2);
+                brushDirLast.normalize();
 
-                Dobot::CDescartesPoint rotatetooljointleave{};
-                rotatetooljointleave.x = 0;
-                rotatetooljointleave.y = 20;
-                rotatetooljointleave.z = 0;
-                rotatetooljointleave.rx = 0;
-                rotatetooljointleave.ry = 0;
-                rotatetooljointleave.rz = 0;
-                demo->RelMovJDemo(rotatetooljointleave, 0, 5, 20, 50, 100);
+                Dobot::CDescartesPoint leavePt = lastPt;
+                leavePt.x += -brushDirLast.x() * 20;
+                leavePt.y += -brushDirLast.y() * 20;
+                leavePt.z += -brushDirLast.z() * 20;
+                demo->moveRobotC(leavePt, leavePt);
             }
 
             // Dobot::CDescartesPoint rotatetooljoints{};
