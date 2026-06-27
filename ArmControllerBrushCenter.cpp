@@ -1638,7 +1638,9 @@ int main()
             targetxsa = offset.x;
             targetysa = offset.y;
             targetzsa = offset.z;
-            while (true)
+            int poseWaitCount = 0;
+            const int kMaxPoseWait = 7500;
+            while (poseWaitCount < kMaxPoseWait)
             {
                 if (demo->getCurrentPose(0, 0, gxsa, gysa, gzsa, grxsa, grysa, grzsa))
                 {
@@ -1651,13 +1653,30 @@ int main()
                         break;
                     }
                 }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                ++poseWaitCount;
+            }
+            if (poseWaitCount >= kMaxPoseWait)
+            {
+                std::cerr << "点 " << i << " 到位等待超时，继续力控采样\n";
             }
 
-            float force[6];
-            while (obj->GetCurrentForceData(force) != 28 && force[2] != 0)
+            float force[6]{};
+            int forceReadRetry = 0;
+            const int kMaxForceReadRetry = 100;
+            while (forceReadRetry < kMaxForceReadRetry)
             {
+                if (obj->GetCurrentForceData(force) == 28 || force[2] == 0)
+                    break;
                 std::cerr << "获取力控数据失败\n";
-                // return -1;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                ++forceReadRetry;
+            }
+            if (forceReadRetry >= kMaxForceReadRetry)
+            {
+                std::cerr << "点 " << i << " 力控读数超时，保留当前位姿\n";
+                converged = true;
+                break;
             }
             force[0] -= forcefirst[0];
             force[1] -= forcefirst[1];

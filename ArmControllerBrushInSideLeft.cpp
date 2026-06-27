@@ -67,16 +67,20 @@ Eigen::Vector3d getRotatedZAxisFromDegrees(double rx_deg, double ry_deg, double 
 void dragTuneXYZ(DobotTcpDemo *demo, Dobot::CDescartesPoint &curPose,
                  Eigen::Vector3d &totalOffset)
 {
-    // 拖拽前记录刷尖(tool5)在base系的位置
+    const double savedRx = curPose.rx;
+    const double savedRy = curPose.ry;
+    const double savedRz = curPose.rz;
+
+    // 轨迹点为法兰(tool0)位姿，必须用法兰位移(不能用tool5刷尖位移)
     double bx = 0, by = 0, bz = 0, brx = 0, bry = 0, brz = 0;
-    while (!demo->getCurrentPose(0, 5, bx, by, bz, brx, bry, brz))
+    while (!demo->getCurrentPose(0, 0, bx, by, bz, brx, bry, brz))
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(300)); // 进入拖拽前等待到位稳定
     demo->startDrag();
     std::cout << "\n===== 拖拽微调模式 =====\n"
               << "机械臂已进入拖拽模式：请手动拖动机械臂，使刷尖到达目标位置。\n"
-              << "(拖拽时姿态rx/ry/rz会变化，确认后会自动恢复为原始姿态，仅采用xyz位移)\n"
+              << "(拖拽时姿态会变化，确认后恢复为原rx/ry/rz，仅采用法兰xyz位移)\n"
               << "完成后按 Enter 确认...\n";
     while (true)
     {
@@ -88,31 +92,27 @@ void dragTuneXYZ(DobotTcpDemo *demo, Dobot::CDescartesPoint &curPose,
         Sleep(10);
     }
 
-    // 拖拽后记录刷尖(tool5)在base系的位置
     double ax = 0, ay = 0, az = 0, arx = 0, ary = 0, arz = 0;
-    while (!demo->getCurrentPose(0, 5, ax, ay, az, arx, ary, arz))
+    while (!demo->getCurrentPose(0, 0, ax, ay, az, arx, ary, arz))
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     demo->stopDrag();
     std::this_thread::sleep_for(std::chrono::milliseconds(300)); // 等待退出拖拽模式稳定
 
-    // base系下刷尖位移 = 需要施加到法兰轨迹点上的偏移(平移与姿态无关)
     double dx = ax - bx;
     double dy = ay - by;
     double dz = az - bz;
     totalOffset += Eigen::Vector3d(dx, dy, dz);
 
-    // 恢复原始姿态、采用拖拽后的xyz：对法兰点做相同的base系平移
     curPose.x += dx;
     curPose.y += dy;
     curPose.z += dz;
+    curPose.rx = savedRx;
+    curPose.ry = savedRy;
+    curPose.rz = savedRz;
     demo->moveRobotC(curPose, curPose);
 
-    Dobot::CDescartesPoint lifted = curPose;
-    lifted.z += 100; // 基坐标系 Z 上抬 100mm
-    demo->moveRobotC(lifted, lifted);
-
-    std::cout << "拖拽位移(刷尖, base系)[mm]: " << dx << ", " << dy << ", " << dz << std::endl;
+    std::cout << "拖拽位移(法兰, base系)[mm]: " << dx << ", " << dy << ", " << dz << std::endl;
     std::cout << "累计偏移[mm]: " << totalOffset.transpose() << std::endl;
 }
 
@@ -2400,7 +2400,9 @@ int main()
             targetxsa = offset.x;
             targetysa = offset.y;
             targetzsa = offset.z;
-            while (true)
+            int poseWaitCount = 0;
+            const int kMaxPoseWait = 7500;
+            while (poseWaitCount < kMaxPoseWait)
             {
                 if (demo->getCurrentPose(0, 0, gxsa, gysa, gzsa, grxsa, grysa, grzsa))
                 {
@@ -2414,13 +2416,29 @@ int main()
                     }
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                ++poseWaitCount;
+            }
+            if (poseWaitCount >= kMaxPoseWait)
+            {
+                std::cerr << "点 " << i << " 到位等待超时，继续力控采样\n";
             }
 
             float force[6]{};
-            while (obj->GetCurrentForceData(force) != 28 && force[2] != 0)
+            int forceReadRetry = 0;
+            const int kMaxForceReadRetry = 100;
+            while (forceReadRetry < kMaxForceReadRetry)
             {
+                if (obj->GetCurrentForceData(force) == 28 || force[2] == 0)
+                    break;
                 std::cerr << "获取力控数据失败\n";
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                ++forceReadRetry;
+            }
+            if (forceReadRetry >= kMaxForceReadRetry)
+            {
+                std::cerr << "点 " << i << " 力控读数超时，保留当前位姿\n";
+                converged = true;
+                break;
             }
             force[0] -= forcefirst[0];
             force[1] -= forcefirst[1];
@@ -2564,8 +2582,6 @@ int main()
     demo->moveRobotC(pointstartsk, pointstartsk);
     demo->moveRobotC(firstPosesk, firstPosesk);
 
-    std::cout << "运行完整力控轨迹（每行一次movsDemoC）" << std::endl;
-    std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
     std::cout << "运行完整力控轨迹（每行一次movsDemoC）" << std::endl;
     std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
 
@@ -2748,15 +2764,17 @@ int main()
             }
             else
             {
+                // 最后一段：沿刷头 -Z 方向笛卡尔抬离，避免 RelMovJ 触发限位导致后续退出/浮刷中断
+                const Dobot::CDescartesPoint &lastPt = selectedPoints.back();
+                Eigen::Matrix3d rotLast = eulerDegToRotationMatrix(lastPt.rx, lastPt.ry, lastPt.rz);
+                Eigen::Vector3d brushDirLast = rotLast.col(2);
+                brushDirLast.normalize();
 
-                Dobot::CDescartesPoint rotatetooljointleave{};
-                rotatetooljointleave.x = 0;
-                rotatetooljointleave.y = 20;
-                rotatetooljointleave.z = 0;
-                rotatetooljointleave.rx = 0;
-                rotatetooljointleave.ry = 0;
-                rotatetooljointleave.rz = 0;
-                demo->RelMovJDemo(rotatetooljointleave, 0, 5, 20, 50, 100);
+                Dobot::CDescartesPoint leavePt = lastPt;
+                leavePt.x += -brushDirLast.x() * 20;
+                leavePt.y += -brushDirLast.y() * 20;
+                leavePt.z += -brushDirLast.z() * 20;
+                demo->moveRobotC(leavePt, leavePt);
             }
 
             // Dobot::CDescartesPoint rotatetooljoints{};
@@ -2852,7 +2870,7 @@ int main()
 
         std::cout << "--- 正在处理第 " << i + 1 << " 个任务，目标点 ID: " << currentTargetId << " ---" << std::endl;
 
-        descartesPointsforce[currentTargetId].z += 52;
+        descartesPointsforce[currentTargetId].z += 50;
         demo->moveRobotC(descartesPointsforce[currentTargetId], descartesPointsforce[currentTargetId]);
         // std::this_thread::sleep_for(std::chrono::seconds(1)); // 等待稳定
 
