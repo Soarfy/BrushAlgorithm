@@ -52,5 +52,10 @@ __pycache__/
 .venv/
 venv/
 
+# ===== defaultconfig runtime / backup =====
+defaultconfig/**/*.bak
+defaultconfig/**/movs_force_during_movs.txt
+defaultconfig/**/current_pose_from_getpose.txt
+
 # ===== Embedded/separate project (has its own git repo) =====
 force_control/
