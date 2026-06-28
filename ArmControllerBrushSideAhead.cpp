@@ -2273,16 +2273,14 @@ int main()
 
     if (demoConfig.demoFloatBrush)
     {
-        if (!demoConfig.demoForceTrajectory)
-        {
-            demo->moveRobotC(pointsafe, pointsafe);
-            liftRelativeMm(38);
-            demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
-        }
+        demo->moveRobotC(pointsafe, pointsafe);
+        liftRelativeMm(38);
+        demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
 
     std::cout << "开始浮刷" << std::endl;
     std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
     runPickedPathToFrontTeeth("扶刷前", &pointstartsk);
+    demo->moveRobotC(firstPosesk, firstPosesk);
 
 #if 0 // 保留：原 computeRelativeTransform 对齐方式（已停用）
     xA = pickedPathPoints.back().x;

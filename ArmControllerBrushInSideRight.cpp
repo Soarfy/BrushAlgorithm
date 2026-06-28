@@ -1821,32 +1821,14 @@ int main()
 
     if (demoConfig.demoForceTrajectory)
     {
-    Dobot::CDescartesPoint firstPosesk{};
-    firstPosesk.x = descartesPointsforce[0].x;
-    firstPosesk.y = descartesPointsforce[0].y;
-    firstPosesk.z = descartesPointsforce[0].z;
-    firstPosesk.rx = descartesPointsforce[0].rx;
-    firstPosesk.ry = descartesPointsforce[0].ry;
-    firstPosesk.rz = descartesPointsforce[0].rz;
-    Eigen::Matrix3d rotationMatrixssk = eulerDegToRotationMatrix(firstPosesk.rx, firstPosesk.ry, firstPosesk.rz);
-    Eigen::Vector3d brushDirssk = rotationMatrixssk.col(2);
-    brushDirssk.normalize();
-
-    Dobot::CDescartesPoint pointstartsk{};
-    pointstartsk.x = firstPosesk.x + -brushDirssk.x() * 8;
-    pointstartsk.y = firstPosesk.y + -brushDirssk.y() * 8;
-    pointstartsk.z = firstPosesk.z + -brushDirssk.z() * 8;
-    pointstartsk.rx = firstPosesk.rx;
-    pointstartsk.ry = firstPosesk.ry;
-    pointstartsk.rz = firstPosesk.rz;
-
-    demo->moveRobotC(pointsafe, pointsafe);
-    std::cout << "初始位：先上抬再旋转，前往轨迹起点..." << std::endl;
-    demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
-    demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
-
-    demo->moveRobotC(pointstartsk, pointstartsk);
-    demo->moveRobotC(firstPosesk, firstPosesk);
+    if (descartesPointsforce.empty())
+    {
+        std::cerr << "力控轨迹为空，跳过 movs 演示。" << std::endl;
+    }
+    else
+    {
+    liftRotateApproachFirstPoint(demo, pointsafe, rotatetooljointjump, rotatetooljoint,
+                                 descartesPointsforce[0]);
 
     std::cout << "运行完整力控轨迹（每行一次movsDemoC）" << std::endl;
     std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
@@ -2056,19 +2038,10 @@ int main()
 
     indexFile.close();
     }
+    }
     else
     {
         std::cout << "未启用演示力控调整后轨迹 (demoForceTrajectory=false)，跳过 movs 演示。" << std::endl;
-    }
-
-    if (demoConfig.demoForceTrajectory || demoConfig.demoFloatBrush)
-    {
-        demo->moveRobotC(pointsafe, pointsafe);
-        demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
-    }
-    else
-    {
-        demo->moveRobotC(pointsafe, pointsafe);
     }
 
     if (demoConfig.demoFloatBrush)
@@ -2105,6 +2078,9 @@ int main()
     }
     else
     {
+    if (!descartesPointsforce.empty())
+        liftRotateApproachFirstPoint(demo, pointsafe, rotatetooljointjump, rotatetooljoint,
+                                     descartesPointsforce[0]);
     // 3. 循环处理每一个 ID
     for (size_t i = 0; i < targetIds.size(); ++i)
     {
@@ -2163,6 +2139,8 @@ int main()
     else
     {
         std::cout << "未启用演示浮刷轨迹 (demoFloatBrush=false)，跳过浮刷演示。" << std::endl;
+        if (!demoConfig.demoForceTrajectory)
+            demo->moveRobotC(pointsafe, pointsafe);
     }
 
     // 退出

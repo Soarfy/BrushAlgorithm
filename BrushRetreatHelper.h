@@ -93,3 +93,28 @@ inline void retreatFromCurrentPose(DobotTcpDemo *demo, double tcpRetreatMm = kBr
     pt.rz = grz;
     retreatTcpZThenLiftBaseZ(demo, pt, tcpRetreatMm, baseLiftMm);
 }
+
+inline void liftRotateApproachFirstPoint(DobotTcpDemo *demo,
+                                         const Dobot::CDescartesPoint &pointsafe,
+                                         Dobot::CDescartesPoint rotatetooljointjump,
+                                         Dobot::CDescartesPoint rotatetooljoint,
+                                         const Dobot::CDescartesPoint &firstPoint,
+                                         double approachOffsetMm = 8.0)
+{
+    demo->moveRobotC(pointsafe, pointsafe);
+    std::cout << "初始位：先上抬再旋转，前往轨迹起点..." << std::endl;
+    demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
+    demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
+
+    Eigen::Matrix3d rot = brushEulerDegToRotationMatrix(firstPoint.rx, firstPoint.ry, firstPoint.rz);
+    Eigen::Vector3d brushDir = rot.col(2);
+    brushDir.normalize();
+
+    Dobot::CDescartesPoint approach = firstPoint;
+    approach.x += -brushDir.x() * approachOffsetMm;
+    approach.y += -brushDir.y() * approachOffsetMm;
+    approach.z += -brushDir.z() * approachOffsetMm;
+
+    demo->moveRobotC(approach, approach);
+    demo->moveRobotC(firstPoint, firstPoint);
+}
