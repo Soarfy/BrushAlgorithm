@@ -6,5 +6,7 @@
     "brushSpeed": 30.0,
     "backAndForthCount": 10,
     "pressureParameter": 0.0,
-    "brushDuration": 30
+    "brushDuration": 30,
+    "demoForceTrajectory": false,
+    "demoFloatBrush": false
 }

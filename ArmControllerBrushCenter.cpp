@@ -15,6 +15,7 @@
 #include <string>
 #include "nlohmann/json.hpp"
 #include "ForceTrajectoryIO.h"
+#include "BrushDemoConfig.h"
 using json = nlohmann::json;
 
 #define MODE 0
@@ -681,6 +682,7 @@ int main()
     int backAndForthCount;
     double pressureParameter;
     int brushDuration;
+    BrushDemoConfig demoConfig{};
     try
     {
         std::ifstream file(Brush_Config);
@@ -698,6 +700,7 @@ int main()
         backAndForthCount = j.at("backAndForthCount").get<int>();
         pressureParameter = j.at("pressureParameter").get<double>();
         brushDuration = j.at("brushDuration").get<int>();
+        loadBrushDemoConfig(j, demoConfig);
 
         std::cout << "teethModelPath: " << teethModelPath << std::endl;
         std::cout << "toothbrushPath: " << toothbrushPath << std::endl;
@@ -1785,6 +1788,9 @@ int main()
         return -1;
     }
     std::cout << "调整后的力控轨迹保存完毕 (" << descartesPointsforce.size() << " 点)" << std::endl;
+
+    if (demoConfig.demoForceTrajectory)
+    {
     demo->moveRobotC(pointsafe, pointsafe);
     std::cout << "初始位：先上抬再旋转，前往轨迹起点..." << std::endl;
     demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
@@ -1887,6 +1893,11 @@ int main()
     }
 
     indexFile.close();
+    }
+    else
+    {
+        std::cout << "未启用演示力控调整后轨迹 (demoForceTrajectory=false)，跳过 movs 演示。" << std::endl;
+    }
 
     // 退出
     demo->moveRobotC(pointsafe, pointsafe);

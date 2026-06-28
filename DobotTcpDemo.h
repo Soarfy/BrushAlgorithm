@@ -1,3 +1,4 @@
+#pragma once
 
 #include "api/Dashboard.h"
 #include "api/Feedback.h"

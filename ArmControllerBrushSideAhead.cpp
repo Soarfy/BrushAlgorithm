@@ -17,6 +17,7 @@
 #include <string>
 #include "nlohmann/json.hpp"
 #include "ForceTrajectoryIO.h"
+#include "BrushDemoConfig.h"
 #include "api/Dashboard.h"
 #include <regex>
 #include <thread>
@@ -649,6 +650,7 @@ int main()
     int backAndForthCount;
     double pressureParameter;
     int brushDuration;
+    BrushDemoConfig demoConfig{};
     try
     {
         std::ifstream file(Brush_Config);
@@ -667,6 +669,7 @@ int main()
         pressureParameter = j.at("pressureParameter").get<double>();
         // pressureParameter = 0.15;
         brushDuration = j.at("brushDuration").get<int>();
+        loadBrushDemoConfig(j, demoConfig);
 
         std::cout << "teethModelPath: " << teethModelPath << std::endl;
         std::cout << "toothbrushPath: " << toothbrushPath << std::endl;
@@ -2050,17 +2053,6 @@ int main()
         return -1;
     }
     std::cout << "调整后的力控轨迹保存完毕 (" << descartesPointsforce.size() << " 点)" << std::endl;
-    Dobot::CDescartesPoint rotatetooljointjump32{};
-    rotatetooljointjump32.x = 0;
-    rotatetooljointjump32.y = 0;
-    rotatetooljointjump32.z = -18;
-    rotatetooljointjump32.rx = 0;
-    rotatetooljointjump32.ry = 0;
-    rotatetooljointjump32.rz = 0;
-    demo->RelMovJDemo(rotatetooljointjump32, 0, 5, 20, 50, 100);
-    moveToSafeViaWaypoints();
-    liftRelativeMm(38);
-    demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
 
     Dobot::CDescartesPoint firstPosesk{};
     firstPosesk.x = descartesPointsforce[0].x;
@@ -2080,6 +2072,20 @@ int main()
     pointstartsk.rx = firstPosesk.rx;
     pointstartsk.ry = firstPosesk.ry;
     pointstartsk.rz = firstPosesk.rz;
+
+    if (demoConfig.demoForceTrajectory)
+    {
+    Dobot::CDescartesPoint rotatetooljointjump32{};
+    rotatetooljointjump32.x = 0;
+    rotatetooljointjump32.y = 0;
+    rotatetooljointjump32.z = -18;
+    rotatetooljointjump32.rx = 0;
+    rotatetooljointjump32.ry = 0;
+    rotatetooljointjump32.rz = 0;
+    demo->RelMovJDemo(rotatetooljointjump32, 0, 5, 20, 50, 100);
+    moveToSafeViaWaypoints();
+    liftRelativeMm(38);
+    demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
 
     runPickedPathToFrontTeeth("往复刷牙前", &pointstartsk);
     std::cout << "往复刷牙前 Start :-)" << std::endl;
@@ -2245,7 +2251,34 @@ int main()
     demo->moveRobotC(pointsafe, pointsafe);
     liftRelativeMm(38);
     demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
+    }
+    else
+    {
+        std::cout << "未启用演示力控调整后轨迹 (demoForceTrajectory=false)，跳过 movs 演示。" << std::endl;
+        if (!demoConfig.demoFloatBrush)
+        {
+            Dobot::CDescartesPoint rotatetooljointjump32{};
+            rotatetooljointjump32.x = 0;
+            rotatetooljointjump32.y = 0;
+            rotatetooljointjump32.z = -18;
+            rotatetooljointjump32.rx = 0;
+            rotatetooljointjump32.ry = 0;
+            rotatetooljointjump32.rz = 0;
+            demo->RelMovJDemo(rotatetooljointjump32, 0, 5, 20, 50, 100);
+            moveToSafeViaWaypoints();
+            liftRelativeMm(38);
+            demo->moveRobotC(pointsafe, pointsafe);
+        }
+    }
 
+    if (demoConfig.demoFloatBrush)
+    {
+        if (!demoConfig.demoForceTrajectory)
+        {
+            demo->moveRobotC(pointsafe, pointsafe);
+            liftRelativeMm(38);
+            demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
+        }
 
     std::cout << "开始浮刷" << std::endl;
     std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
@@ -2383,6 +2416,11 @@ int main()
 
     demo->RelMovJDemo(rotatetooljointjump22, 0, 0, 20, 50, 100);
     moveToSafeViaWaypoints();
+    }
+    else
+    {
+        std::cout << "未启用演示浮刷轨迹 (demoFloatBrush=false)，跳过浮刷演示。" << std::endl;
+    }
 
     // 退出
     demo->moveRobotC(pointsafe, pointsafe);

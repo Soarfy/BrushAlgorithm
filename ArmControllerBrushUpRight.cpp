@@ -20,6 +20,8 @@
 #include <string>
 #include "nlohmann/json.hpp"
 #include "ForceTrajectoryIO.h"
+#include "BrushDemoConfig.h"
+#include "BrushRetreatHelper.h"
 using json = nlohmann::json;
 
 #define MODE 0
@@ -1073,6 +1075,7 @@ int main()
     int backAndForthCount;
     double pressureParameter;
     int brushDuration;
+    BrushDemoConfig demoConfig{};
     try
     {
         std::ifstream file(Brush_Config);
@@ -1090,6 +1093,7 @@ int main()
         backAndForthCount = j.at("backAndForthCount").get<int>();
         pressureParameter = j.at("pressureParameter").get<double>();
         brushDuration = j.at("brushDuration").get<int>();
+        loadBrushDemoConfig(j, demoConfig);
 
         std::cout << "teethModelPath: " << teethModelPath << std::endl;
         std::cout << "toothbrushPath: " << toothbrushPath << std::endl;
@@ -1778,6 +1782,9 @@ int main()
         params.freq = 0.2;
         demo->movsDemoC(descartesPoints, params);
 
+        if (!descartesPoints.empty())
+            retreatTcpZThenLiftBaseZ(demo, descartesPoints.back());
+
         std::cout << "\n是否满意当前调整后的轨迹？(y/n): ";
         char choice;
         std::cin >> choice;
@@ -1972,26 +1979,19 @@ int main()
 
             // 记录真实位姿(供 command3 转换轨迹使用)
             double gx, gy, gz, grx, gry, grz;
-            while (true)
+            if (waitValidCurrentPose(demo, gx, gy, gz, grx, gry, grz))
             {
-                if (demo->getCurrentPose(0, 0, gx, gy, gz, grx, gry, grz) &&
-                    !std::isnan(gx) && !std::isnan(gy) && !std::isnan(gz) &&
-                    !std::isnan(grx) && !std::isnan(gry) && !std::isnan(grz))
+                if (poseFile.is_open())
                 {
-                    if (poseFile.is_open())
-                    {
-                        poseFile << gx << " " << gy << " " << gz << " "
-                                 << grx << " " << gry << " " << grz << std::endl;
-                        poseFile.close();
-                        std::cout << "[模式1] 当前刷头位置已保存\n";
-                    }
-                    else
-                    {
-                        std::cerr << "[模式1] 当前刷头位置保存失败\n";
-                    }
-                    break;
+                    poseFile << gx << " " << gy << " " << gz << " "
+                             << grx << " " << gry << " " << grz << std::endl;
+                    poseFile.close();
+                    std::cout << "[模式1] 当前刷头位置已保存\n";
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(60));
+                else
+                {
+                    std::cerr << "[模式1] 当前刷头位置保存失败\n";
+                }
             }
 
             // ---- 模式1: H2 轨迹转换到机械臂末端 ----
@@ -2152,6 +2152,9 @@ int main()
             params.a = 80;
             params.freq = 0.2;
             demo->movsDemoC(descartesPoints, params);
+
+            if (!descartesPoints.empty())
+                retreatTcpZThenLiftBaseZ(demo, descartesPoints.back());
 
             std::cout << "\n是否满意当前调整后的轨迹？(y/n): ";
             char choice;
@@ -2423,6 +2426,9 @@ int main()
         descartesPointsforce.push_back(offset);
     }
 
+    if (!descartesPointsforce.empty())
+        retreatTcpZThenLiftBaseZ(demo, descartesPointsforce.back());
+
     forcerepaired.close();
     forcerepairedoutputfile.close();
 
@@ -2440,6 +2446,9 @@ int main()
         return -1;
     }
     std::cout << "调整后的力控轨迹保存完毕 (" << descartesPointsforce.size() << " 点)" << std::endl;
+
+    if (demoConfig.demoForceTrajectory)
+    {
     demo->moveRobotC(pointsafe, pointsafe);
     std::cout << "初始位：先上抬再旋转，前往轨迹起点..." << std::endl;
     demo->RelMovJDemo(rotatetooljointjump, 0, 5, 20, 50, 100);
@@ -2606,15 +2615,7 @@ int main()
             }
             else
             {
-
-                Dobot::CDescartesPoint rotatetooljointleave{};
-                rotatetooljointleave.x = 0;
-                rotatetooljointleave.y = 20;
-                rotatetooljointleave.z = 0;
-                rotatetooljointleave.rx = 0;
-                rotatetooljointleave.ry = 0;
-                rotatetooljointleave.rz = 0;
-                demo->RelMovJDemo(rotatetooljointleave, 0, 5, 20, 50, 100);
+                retreatTcpZThenLiftBaseZ(demo, selectedPoints.back());
             }
 
             // Dobot::CDescartesPoint rotatetooljoints{};
@@ -2659,18 +2660,12 @@ int main()
     // }
     // [MOD-FORCE-LOG-END]
 
-    // 基于当前点往上抬
-    Dobot::CDescartesPoint rotatetooljointup{};
-    rotatetooljointup.x = 0;
-    rotatetooljointup.y = 0;
-    rotatetooljointup.z = -60;
-    rotatetooljointup.rx = 0;
-    rotatetooljointup.ry = 0;
-    rotatetooljointup.rz = 0;
-
-    demo->RelMovJDemo(rotatetooljointup, 0, 0, 20, 50, 100);
-
     indexFile.close();
+    }
+    else
+    {
+        std::cout << "未启用演示力控调整后轨迹 (demoForceTrajectory=false)，跳过 movs 演示。" << std::endl;
+    }
 
     // 退出
     demo->moveRobotC(pointsafe, pointsafe);

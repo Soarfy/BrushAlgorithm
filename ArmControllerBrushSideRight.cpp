@@ -17,6 +17,8 @@
 #include <string>
 #include "nlohmann/json.hpp"
 #include "ForceTrajectoryIO.h"
+#include "BrushDemoConfig.h"
+#include "BrushRetreatHelper.h"
 using json = nlohmann::json;
 
 #define MODE 0
@@ -619,6 +621,7 @@ int main()
     int backAndForthCount;
     double pressureParameter;
     int brushDuration;
+    BrushDemoConfig demoConfig{};
     try
     {
         std::ifstream file(Brush_Config);
@@ -636,6 +639,7 @@ int main()
         backAndForthCount = j.at("backAndForthCount").get<int>();
         pressureParameter = j.at("pressureParameter").get<double>();
         brushDuration = j.at("brushDuration").get<int>();
+        loadBrushDemoConfig(j, demoConfig);
 
         std::cout << "teethModelPath: " << teethModelPath << std::endl;
         std::cout << "toothbrushPath: " << toothbrushPath << std::endl;
@@ -1251,11 +1255,8 @@ int main()
         params.freq = 0.2;
         demo->movsDemoC(descartesPoints, params);
 
-        {
-            Dobot::CDescartesPoint lifted = descartesPoints.back();
-            lifted.z += 100; // 基坐标系 Z 上抬 100mm
-            demo->moveRobotC(lifted, lifted);
-        }
+        if (!descartesPoints.empty())
+            retreatTcpZThenLiftBaseZ(demo, descartesPoints.back());
 
         std::cout << "\n是否满意当前调整后的轨迹？(y/n): ";
         char choice;
@@ -1416,26 +1417,19 @@ int main()
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
             double gx, gy, gz, grx, gry, grz;
-            while (true)
+            if (waitValidCurrentPose(demo, gx, gy, gz, grx, gry, grz))
             {
-                if (demo->getCurrentPose(0, 0, gx, gy, gz, grx, gry, grz) &&
-                    !std::isnan(gx) && !std::isnan(gy) && !std::isnan(gz) &&
-                    !std::isnan(grx) && !std::isnan(gry) && !std::isnan(grz))
+                if (poseFile.is_open())
                 {
-                    if (poseFile.is_open())
-                    {
-                        poseFile << gx << " " << gy << " " << gz << " "
-                                 << grx << " " << gry << " " << grz << std::endl;
-                        poseFile.close();
-                        std::cout << "[模式1] 当前刷头位置已保存\n";
-                    }
-                    else
-                    {
-                        std::cerr << "[模式1] 当前刷头位置保存失败\n";
-                    }
-                    break;
+                    poseFile << gx << " " << gy << " " << gz << " "
+                             << grx << " " << gry << " " << grz << std::endl;
+                    poseFile.close();
+                    std::cout << "[模式1] 当前刷头位置已保存\n";
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(60));
+                else
+                {
+                    std::cerr << "[模式1] 当前刷头位置保存失败\n";
+                }
             }
 
             std::cout << "[模式1] 将轨迹转换到机械臂末端..." << std::endl;
@@ -1595,11 +1589,8 @@ int main()
             params.freq = 0.2;
             demo->movsDemoC(descartesPoints, params);
 
-            {
-                Dobot::CDescartesPoint lifted = descartesPoints.back();
-                lifted.z += 100; // 基坐标系 Z 上抬 100mm
-                demo->moveRobotC(lifted, lifted);
-            }
+            if (!descartesPoints.empty())
+                retreatTcpZThenLiftBaseZ(demo, descartesPoints.back());
 
             std::cout << "\n是否满意当前调整后的轨迹？(y/n): ";
             char choice;
@@ -1866,6 +1857,9 @@ int main()
         descartesPointsforce.push_back(offset);
     }
 
+    if (!descartesPointsforce.empty())
+        retreatTcpZThenLiftBaseZ(demo, descartesPointsforce.back());
+
     forcerepairedoutputfile.close();
     forcerepaired.close();
 
@@ -1884,6 +1878,8 @@ int main()
     }
     std::cout << "调整后的力控轨迹保存完毕 (" << descartesPointsforce.size() << " 点)" << std::endl;
 
+    if (demoConfig.demoForceTrajectory)
+    {
     Dobot::CDescartesPoint firstPosesk{};
     firstPosesk.x = descartesPointsforce[0].x;
     firstPosesk.y = descartesPointsforce[0].y;
@@ -1902,13 +1898,6 @@ int main()
     pointstartsk.rx = firstPosesk.rx;
     pointstartsk.ry = firstPosesk.ry;
     pointstartsk.rz = firstPosesk.rz;
-
-    if (!descartesPointsforce.empty())
-    {
-        Dobot::CDescartesPoint lifted = descartesPointsforce.back();
-        lifted.z += 100; // 基坐标系 Z 上抬 100mm
-        demo->moveRobotC(lifted, lifted);
-    }
 
     demo->moveRobotC(pointsafe, pointsafe);
     std::cout << "初始位：先上抬再旋转，前往轨迹起点..." << std::endl;
@@ -2008,44 +1997,30 @@ int main()
             }
             else
             {
-                // 最后一段：沿刷头 -Z 方向做笛卡尔抬离，安全离开牙面。
-                // 原先在末点做工具系关节相对运动(RelMovJ +Y20)，在轨迹末端容易触发关节限位/奇异，
-                // 导致机械臂报警、后续回安全点与浮刷流程被中断("挂掉")。
-                const Dobot::CDescartesPoint &lastPt = selectedPoints.back();
-                Eigen::Matrix3d rotLast = eulerDegToRotationMatrix(lastPt.rx, lastPt.ry, lastPt.rz);
-                Eigen::Vector3d brushDirLast = rotLast.col(2);
-                brushDirLast.normalize();
-
-                Dobot::CDescartesPoint leavePt = lastPt;
-                leavePt.x += -brushDirLast.x() * 20;
-                leavePt.y += -brushDirLast.y() * 20;
-                leavePt.z += -brushDirLast.z() * 20;
-                demo->moveRobotC(leavePt, leavePt);
+                retreatTcpZThenLiftBaseZ(demo, selectedPoints.back());
             }
         }
     }
 
-    // 走完完整轨迹后：沿机械臂基坐标系上抬80mm
+    indexFile.close();
+    }
+    else
     {
-        double gx, gy, gz, grx, gry, grz;
-        while (!demo->getCurrentPose(0, 0, gx, gy, gz, grx, gry, grz))
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        Dobot::CDescartesPoint lifted{};
-        lifted.x = gx;
-        lifted.y = gy;
-        lifted.z = gz + 80; // 基坐标系 Z 上抬 80mm
-        lifted.rx = grx;
-        lifted.ry = gry;
-        lifted.rz = grz;
-        demo->moveRobotC(lifted, lifted);
+        std::cout << "未启用演示力控调整后轨迹 (demoForceTrajectory=false)，跳过 movs 演示。" << std::endl;
     }
 
-    indexFile.close();
+    if (demoConfig.demoForceTrajectory || demoConfig.demoFloatBrush)
+    {
+        demo->moveRobotC(pointsafe, pointsafe);
+        demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
+    }
+    else
+    {
+        demo->moveRobotC(pointsafe, pointsafe);
+    }
 
-    // 退出
-    demo->moveRobotC(pointsafe, pointsafe);
-    demo->RelMovJDemo(rotatetooljoint, 0, 5, 20, 50, 100);
-
+    if (demoConfig.demoFloatBrush)
+    {
     // // 专门浮刷
     std::ifstream indexFiles(indexFilePath2);
     if (!indexFiles.is_open())
@@ -2074,15 +2049,10 @@ int main()
 
     if (targetIds.empty())
     {
-        std::cout << "索引文件为空，无需运动。" << std::endl;
-        return 0;
+        std::cout << "索引文件为空，跳过浮刷运动。" << std::endl;
     }
-
-    // 2. 初始动作：移动到第0个点（初始扶刷准备位）
-    // std::cout << "初始定位至起点 (ID: 0)..." << std::endl;
-    // demo->moveRobotC(descartesPointsforce[0], descartesPointsforce[0]);
-    // std::this_thread::sleep_for(std::chrono::seconds(1));
-
+    else
+    {
     // 3. 循环处理每一个 ID
     for (size_t i = 0; i < targetIds.size(); ++i)
     {
@@ -2132,19 +2102,15 @@ int main()
         // 如果读到最后一行，自动结束循环
         if (i == targetIds.size() - 1)
         {
-            double gx, gy, gz, grx, gry, grz;
-            while (!demo->getCurrentPose(0, 0, gx, gy, gz, grx, gry, grz))
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            Dobot::CDescartesPoint lifted{};
-            lifted.x = gx;
-            lifted.y = gy;
-            lifted.z = gz + 100; // 基坐标系 Z 上抬 100mm
-            lifted.rx = grx;
-            lifted.ry = gry;
-            lifted.rz = grz;
-            demo->moveRobotC(lifted, lifted);
+            retreatFromCurrentPose(demo);
             std::cout << "已完成最后一行索引，流程结束。" << std::endl;
         }
+        }
+    }
+    }
+    else
+    {
+        std::cout << "未启用演示浮刷轨迹 (demoFloatBrush=false)，跳过浮刷演示。" << std::endl;
     }
 
     // 退出
