@@ -26,7 +26,9 @@ public:
     // 参数：descartesPoints - 笛卡尔点位列表（至少 4 个点，至多 50 个点）
     //      params - MovS 可选参数结构体
     void movsDemoC(const std::vector<Dobot::CDescartesPoint>& descartesPoints, const Dobot::MovSParams& params);
-    bool waitMovSFinish(const std::string& movsReply, int timeoutMs = 120000);
+    bool waitMovSFinish(const std::string& movsReply, int timeoutMs = 300000);
+    // 等待机械臂运动完全停稳（RunningStatus/RunQueuedCmd/速度均满足）
+    bool waitRobotMotionDone(int timeoutMs = 120000, int stableMs = 500);
 
     void RelMovJDemo( Dobot::CDescartesPoint& pt,int user=0,int tool=0,int a=10,int v=10,int cp=100);
 

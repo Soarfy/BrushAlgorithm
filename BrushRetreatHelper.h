@@ -54,6 +54,9 @@ inline void retreatTcpZThenLiftBaseZ(DobotTcpDemo *demo, const Dobot::CDescartes
                                    double tcpRetreatMm = kBrushTcpRetreatMm,
                                    double baseLiftMm = kBrushBaseLiftMm)
 {
+    if (!demo->waitRobotMotionDone(180000, 600))
+        std::cerr << "退避前等待运动停稳超时，仍尝试退避\n";
+
     Eigen::Matrix3d rot = brushEulerDegToRotationMatrix(pt.rx, pt.ry, pt.rz);
     Eigen::Vector3d brushDir = rot.col(2);
     brushDir.normalize();
@@ -63,6 +66,7 @@ inline void retreatTcpZThenLiftBaseZ(DobotTcpDemo *demo, const Dobot::CDescartes
     leavePt.y += -brushDir.y() * tcpRetreatMm;
     leavePt.z += -brushDir.z() * tcpRetreatMm;
     demo->moveRobotC(leavePt, leavePt);
+    demo->waitRobotMotionDone(60000, 400);
 
     double gx, gy, gz, grx, gry, grz;
     if (waitValidCurrentPose(demo, gx, gy, gz, grx, gry, grz))

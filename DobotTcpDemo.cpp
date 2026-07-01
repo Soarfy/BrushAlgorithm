@@ -1,6 +1,7 @@
 
 #include "DobotTcpDemo.h"
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <vector>
 
@@ -142,8 +143,11 @@ void DobotTcpDemo::movsDemo(const std::vector<Dobot::CJointPoint>& jointPoints, 
         result = m_Dashboard.MovS(jointPoints, params);
     }
     std::cout << "MovS result: " << result << std::endl;
-    if (!waitMovSFinish(result, 120000)) {
+    if (!waitMovSFinish(result, 300000)) {
         std::cout << "MovS wait timeout or failed." << std::endl;
+    }
+    if (!waitRobotMotionDone(300000, 800)) {
+        std::cout << "MovS motion settle wait timeout." << std::endl;
     }
 }
 
@@ -218,16 +222,68 @@ void DobotTcpDemo::movsDemoC(const std::vector<Dobot::CDescartesPoint>& descarte
         result = m_Dashboard.MovS(descartesPoints, params);
     }
     // std::cout << "MovS result: " << result << std::endl;
-    if (!waitMovSFinish(result, 120000)) {
+    if (!waitMovSFinish(result, 300000)) {
         std::cout << "MovS wait timeout or failed." << std::endl;
     }
+    if (!waitRobotMotionDone(300000, 800)) {
+        std::cout << "MovS motion settle wait timeout." << std::endl;
+    }
+}
 
-    // m_Dashboard.DisableRobot();
+bool DobotTcpDemo::waitRobotMotionDone(int timeoutMs, int stableMs)
+{
+    const auto start = std::chrono::steady_clock::now();
+    int stableAccumMs = 0;
+    const int pollMs = 50;
+    bool logged = false;
+
+    auto isStillMoving = [this]() -> bool {
+        std::unique_lock<std::mutex> lockValue(m_mutexValue);
+        if (feedbackData.RobotMode == 7)
+            return true;
+        if (feedbackData.RunningStatus != 0)
+            return true;
+        if (feedbackData.RunQueuedCmd != 0)
+            return true;
+        double vx = feedbackData.ToolSpeedActual[0];
+        double vy = feedbackData.ToolSpeedActual[1];
+        double vz = feedbackData.ToolSpeedActual[2];
+        const double linearSpeed = std::sqrt(vx * vx + vy * vy + vz * vz);
+        return linearSpeed > 2.0;
+    };
+
+    while (true) {
+        if (!isStillMoving()) {
+            stableAccumMs += pollMs;
+            if (stableAccumMs >= stableMs)
+                return true;
+        } else {
+            if (!logged && stableMs >= 500) {
+                std::cout << "等待机械臂运动停稳..." << std::endl;
+                logged = true;
+            }
+            stableAccumMs = 0;
+        }
+
+        if (timeoutMs > 0) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            if (elapsed > timeoutMs)
+                return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(pollMs));
+    }
 }
 
 bool DobotTcpDemo::waitMovSFinish(const std::string& movsReply, int timeoutMs)
 {
-    return waitQueuedCommandFinish(movsReply, "MovS", timeoutMs);
+    int currentCommandID = 2147483647;
+    getCurrentCommandID(movsReply, currentCommandID);
+    if (currentCommandID == 2147483647) {
+        std::cout << "MovS no valid command id, fallback to motion done wait. recv: " << movsReply << std::endl;
+        return waitRobotMotionDone(timeoutMs, 800);
+    }
+    return waitCommandIdFinish(currentCommandID, timeoutMs);
 }
 
 bool DobotTcpDemo::waitQueuedCommandFinish(const std::string& recvData, const char* commandName, int timeoutMs)
