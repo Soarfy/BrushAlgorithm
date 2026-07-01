@@ -132,6 +132,124 @@ Eigen::Matrix3d eulerDegToRotationMatrix(double rx_deg, double ry_deg, double rz
     return (yawAngle * pitchAngle * rollAngle).toRotationMatrix();
 }
 
+// 速度设置交互函数
+double getSpeedSetting()
+{
+    double speedPercent = 80.0; // 默认值
+    std::cout << "\n===== 速度设置 =====" << std::endl;
+    std::cout << "请输入运行速度百分比 (1-100): ";
+    while (true)
+    {
+        if (std::cin >> speedPercent)
+        {
+            if (speedPercent >= 1 && speedPercent <= 100)
+            {
+                std::cout << "速度设置完成: " << speedPercent << "%" << std::endl;
+                break;
+            }
+            std::cout << "输入无效，请输入1-100之间的数字: ";
+        }
+        else
+        {
+            std::cin.clear();
+            std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+            std::cout << "输入无效，请输入1-100之间的数字: ";
+        }
+    }
+    std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+    return speedPercent;
+}
+
+// 计算TCP末端牙刷的轨迹弧长（考虑姿态变化）
+double calculateTcpTrajectoryLength(const std::vector<Dobot::CDescartesPoint> &points, const Eigen::Vector3d &tcpOffset)
+{
+    if (points.size() < 2)
+        return 0.0;
+
+    double totalLength = 0.0;
+    for (size_t i = 1; i < points.size(); ++i)
+    {
+        // 获取基坐标系下的姿态旋转矩阵
+        Eigen::Matrix3d R_prev = eulerDegToRotationMatrix(points[i-1].rx, points[i-1].ry, points[i-1].rz);
+        Eigen::Matrix3d R_curr = eulerDegToRotationMatrix(points[i].rx, points[i].ry, points[i].rz);
+
+        // TCP末端在基坐标系下的位置
+        Eigen::Vector3d tcpPrev = Eigen::Vector3d(points[i-1].x, points[i-1].y, points[i-1].z) + R_prev * tcpOffset;
+        Eigen::Vector3d tcpCurr = Eigen::Vector3d(points[i].x, points[i].y, points[i].z) + R_curr * tcpOffset;
+
+        // 计算TCP末端的位移
+        Eigen::Vector3d delta = tcpCurr - tcpPrev;
+        totalLength += delta.norm();
+    }
+    return totalLength;
+}
+
+// 测量执行轨迹的真实时间并计算物理速度
+void executeTrajectoryWithTiming(DobotTcpDemo *demo,
+                                 const std::vector<Dobot::CDescartesPoint> &points,
+                                 Dobot::MovSParams &params,
+                                 double speedPercent,
+                                 const Eigen::Vector3d &tcpOffset,
+                                 const std::string &trajName)
+{
+    if (points.size() < 2)
+        return;
+
+    // 计算TCP末端轨迹长度
+    double tcpLength = calculateTcpTrajectoryLength(points, tcpOffset);
+
+    std::cout << "[" << trajName << "] TCP末端弧长: " << tcpLength << "mm, 设定速度: " << speedPercent << "%" << std::endl;
+
+    // 开始计时
+    auto startTime = std::chrono::high_resolution_clock::now();
+
+    // 执行轨迹
+    demo->movsDemoC(points, params);
+
+    // 等待运动完成（简单延时，需要根据实际情况调整）
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // 结束计时
+    auto endTime = std::chrono::high_resolution_clock::now();
+    double actualTime = std::chrono::duration<double>(endTime - startTime).count();
+
+    // 计算真实物理速度
+    double realSpeed = 0.0;
+    if (actualTime > 0.01) // 避免除零
+    {
+        realSpeed = tcpLength / actualTime;
+    }
+
+    std::cout << "[" << trajName << "] 实际时间: " << actualTime << "s, TCP末端真实速度: " << realSpeed << "mm/s" << std::endl;
+}
+
+// 计算轨迹总长度（笛卡尔坐标系）
+double calculateTrajectoryLength(const std::vector<Dobot::CDescartesPoint> &points)
+{
+    if (points.size() < 2)
+        return 0.0;
+
+    double totalLength = 0.0;
+    for (size_t i = 1; i < points.size(); ++i)
+    {
+        double dx = points[i].x - points[i - 1].x;
+        double dy = points[i].y - points[i - 1].y;
+        double dz = points[i].z - points[i - 1].z;
+        totalLength += sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    return totalLength;
+}
+
+// 根据轨迹长度和速度百分比计算预估运行时间
+double estimateRunTime(double trajectoryLength, double speedPercent)
+{
+    const double MAX_SPEED = 500.0; // 假设最大速度500mm/s
+    double actualSpeed = speedPercent / 100.0 * MAX_SPEED;
+    if (actualSpeed <= 0)
+        return 0;
+    return trajectoryLength / actualSpeed;
+}
+
 Dobot::CDescartesPoint makeSideAheadGuideExitPose()
 {
     Dobot::CDescartesPoint p{};
@@ -291,21 +409,32 @@ void executeSideAheadExit(DobotTcpDemo *demo)
 void runSideAheadGuideWithTransition(DobotTcpDemo *demo,
                                      const std::vector<Dobot::CDescartesPoint> &pickedPathPoints,
                                      const std::string &stageTag,
-                                     const Dobot::CDescartesPoint *trajStartAfterGuide)
+                                     const Dobot::CDescartesPoint *trajStartAfterGuide,
+                                     double speedPercent,
+                                     const Eigen::Vector3d &tcpOffset)
 {
     Dobot::MovSParams pickedParams{};
     pickedParams.tool = 0;
     pickedParams.user = 0;
-    pickedParams.v = 80;
+    pickedParams.hasSpeed = false;  // 使用 v 百分比模式
+    pickedParams.v = speedPercent;  // v 是百分比 (1-100)
     pickedParams.a = 80;
     pickedParams.freq = 0.2;
+
+    double guideLength = calculateTrajectoryLength(pickedPathPoints);
+    const double MAX_SPEED = 500.0;
+    double actualSpeed = speedPercent / 100.0 * MAX_SPEED;
+    double guideTime = guideLength / actualSpeed;
+    std::cout << "[" << stageTag << "] 前牙引导轨迹: 长度 " << guideLength << "mm, 速度 " << speedPercent
+              << "%, 预估时间 " << guideTime << "s" << std::endl;
 
     std::cout << "[" << stageTag << "] 先到前牙引导轨迹起点..." << std::endl;
     demo->moveRobotC(pickedPathPoints.front(), pickedPathPoints.front());
     std::cout << "[" << stageTag << "] 执行前牙引导轨迹 (" << pickedPathPoints.size() << " 点)..."
               << std::endl;
-    demo->movsDemoC(pickedPathPoints, pickedParams);
-    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+
+    // 使用时间测量执行轨迹
+    executeTrajectoryWithTiming(demo, pickedPathPoints, pickedParams, speedPercent, tcpOffset, stageTag + "-引导");
 
     if (trajStartAfterGuide == nullptr)
         return;
@@ -435,7 +564,7 @@ Eigen::Vector3d getManualOffset(DobotTcpDemo *demo, double refX, double refY, do
 }
 
 // ================= 3. 核心轨迹执行函数 =================
-void processFolderTrajectory(DobotTcpDemo *demo, const std::string &folderPath, const std::string &folderName, Dobot::MovSParams params, Eigen::Vector3d offset, bool rebrushvalue)
+void processFolderTrajectory(DobotTcpDemo *demo, const std::string &folderPath, const std::string &folderName, Dobot::MovSParams params, Eigen::Vector3d offset, bool rebrushvalue, double speedPercent, const Eigen::Vector3d &tcpOffset)
 {
     std::string fileName = getTargetFileName(folderName);
     std::string trajectoryPath = folderPath + "\\" + fileName;
@@ -554,7 +683,7 @@ void processFolderTrajectory(DobotTcpDemo *demo, const std::string &folderPath, 
             const Dobot::CDescartesPoint firstPosesk = allPoints[0];
             const Dobot::CDescartesPoint pointstartsk = computeBrushApproachStart(firstPosesk, 38.0);
 
-            runSideAheadGuideWithTransition(demo, pickedPathPoints, "往复刷牙前", &pointstartsk);
+            runSideAheadGuideWithTransition(demo, pickedPathPoints, "往复刷牙前", &pointstartsk, speedPercent, tcpOffset);
         }
     }
     else if ((folderName == "center"))
@@ -618,33 +747,41 @@ void processFolderTrajectory(DobotTcpDemo *demo, const std::string &folderPath, 
             // 安全到达
             if (brushvalue != 5 && brushvalue != 6)
             {
-                // if (currentLine==0)
-                // {
-                    selectedPoints[0].z += 0.1;
-                    demo->moveRobotC(selectedPoints[0], selectedPoints[0]);
-                    // std::this_thread::sleep_for(std::chrono::seconds(1));
+                // 计算外侧30mm起始点
+                Dobot::CDescartesPoint outsideStart = computeBrushApproachStart(selectedPoints[0], 30.0);
+                outsideStart.z += 0.1;
+                demo->moveRobotC(outsideStart, outsideStart);
 
-                    Dobot::CDescartesPoint rotatetooljointjumps{};
-                    rotatetooljointjumps.x = 0;
-                    rotatetooljointjumps.y = 0;
-                    rotatetooljointjumps.z = -10;
-                    rotatetooljointjumps.rx = 0;
-                    rotatetooljointjumps.ry = 0;
-                    rotatetooljointjumps.rz = 0;
-                    demo->RelMovJDemo(rotatetooljointjumps, 0, 5, 20, 50, 100);
+                Dobot::CDescartesPoint rotatetooljointjumps{};
+                rotatetooljointjumps.x = 0;
+                rotatetooljointjumps.y = 0;
+                rotatetooljointjumps.z = -10;
+                rotatetooljointjumps.rx = 0;
+                rotatetooljointjumps.ry = 0;
+                rotatetooljointjumps.rz = 0;
+                demo->RelMovJDemo(rotatetooljointjumps, 0, 5, 20, 50, 100);
 
-                    selectedPoints[0].z -= 0.1;
-                    demo->moveRobotC(selectedPoints[0], selectedPoints[0]);
-                // }
-                // else
-                // {
-                //     demo->moveRobotC(selectedPoints[0], selectedPoints[0]);
-                // }
+                demo->moveRobotC(selectedPoints[0], selectedPoints[0]);
 
-                // std::this_thread::sleep_for(std::chrono::seconds(1));
+                // 计算此段轨迹的速度
+                double segmentLength = calculateTrajectoryLength(selectedPoints);
+                const double MAX_SPEED = 500.0;
+                double actualSpeed = speedPercent / 100.0 * MAX_SPEED;
+                double estimatedTime = segmentLength / actualSpeed;
 
-                demo->movsDemoC(selectedPoints, params);
-                // std::this_thread::sleep_for(std::chrono::seconds(2));
+                Dobot::MovSParams runParams;
+                runParams.tool = params.tool;
+                runParams.user = params.user;
+                runParams.hasSpeed = false;  // 使用 v 百分比模式
+                runParams.v = speedPercent;  // v 是百分比 (1-100)
+                runParams.a = params.a;
+                runParams.freq = params.freq;
+
+                std::cout << "[轨迹执行] 段长度: " << segmentLength << "mm, 速度: " << speedPercent
+                          << "%, 预估时间: " << estimatedTime << "s" << std::endl;
+
+                // 使用时间测量执行轨迹
+                executeTrajectoryWithTiming(demo, selectedPoints, runParams, speedPercent, tcpOffset, "轨迹");
 
                 // 根据是否是最后一行选择不同的动作
                 if (!isLastLine)
@@ -662,7 +799,8 @@ void processFolderTrajectory(DobotTcpDemo *demo, const std::string &folderPath, 
                 }
                 else
                 {
-                    std::cout << "hello " << std::endl;
+                    std::cout << "sideahead最后一段轨迹完成" << std::endl;
+                    // 原来 sideahead 的退出模式：y +20（在循环结束后统一执行 z -18 和 moveToSafeViaWaypoints）
                     Dobot::CDescartesPoint rotatetooljointleave{};
                     rotatetooljointleave.x = 0;
                     rotatetooljointleave.y = 20;
@@ -695,46 +833,41 @@ void processFolderTrajectory(DobotTcpDemo *demo, const std::string &folderPath, 
             }
             else
             {
-                // if (currentLine==0)
-                // {
+                // 计算外侧30mm起始点
+                Dobot::CDescartesPoint outsideStart = computeBrushApproachStart(selectedPoints[0], 30.0);
+                outsideStart.z += 0.1;
+                demo->moveRobotC(outsideStart, outsideStart);
 
-                    // 開始刷牙
-                    std::cout << "first ahead" <<std::endl;
-                    selectedPoints[0].z += 0.1;
-                    demo->moveRobotC(selectedPoints[0], selectedPoints[0]);
-                    // std::this_thread::sleep_for(std::chrono::seconds(1));
+                Dobot::CDescartesPoint rotatetooljointjumps{};
+                rotatetooljointjumps.x = 0;
+                rotatetooljointjumps.y = 0;
+                rotatetooljointjumps.z = -10;
+                rotatetooljointjumps.rx = 0;
+                rotatetooljointjumps.ry = 0;
+                rotatetooljointjumps.rz = 0;
+                demo->RelMovJDemo(rotatetooljointjumps, 0, 5, 20, 50, 100);
 
-                    Dobot::CDescartesPoint rotatetooljointjumps{};
-                    rotatetooljointjumps.x = 0;
-                    rotatetooljointjumps.y = 0;
-                    rotatetooljointjumps.z = -10;
-                    rotatetooljointjumps.rx = 0;
-                    rotatetooljointjumps.ry = 0;
-                    rotatetooljointjumps.rz = 0;
-                    demo->RelMovJDemo(rotatetooljointjumps, 0, 5, 20, 50, 100);
+                demo->moveRobotC(selectedPoints[0], selectedPoints[0]);
 
-                    selectedPoints[0].z -= 0.1;
-                    demo->moveRobotC(selectedPoints[0], selectedPoints[0]);
-                    // std::this_thread::sleep_for(std::chrono::seconds(1));
-                // }
-                // else
-                // {
-                //     std::cout << "second ahead" << std::endl;
-                //     selectedPoints[0].z += 0.1;
-                //     demo->moveRobotC(selectedPoints[0], selectedPoints[0]);
-
-                //     selectedPoints[0].z -= 0.1;
-                //     demo->moveRobotC(selectedPoints[0], selectedPoints[0]);
-                // }
+                // 计算此段轨迹的速度
+                double segmentLength = calculateTrajectoryLength(selectedPoints);
+                const double MAX_SPEED = 500.0;
+                double actualSpeed = speedPercent / 100.0 * MAX_SPEED;
+                double estimatedTime = segmentLength / actualSpeed;
 
                 Dobot::MovSParams params1;
                 params1.tool = 0;
                 params1.user = 0;
-                params1.v = 80;
+                params1.hasSpeed = false;  // 使用 v 百分比模式
+                params1.v = speedPercent;  // v 是百分比 (1-100)
                 params1.a = 80;
                 params1.freq = 0.2;
 
-                demo->movsDemoC(selectedPoints, params1);
+                std::cout << "[sideahead轨迹执行] 段长度: " << segmentLength << "mm, 速度: " << speedPercent
+                          << "%, 预估时间: " << estimatedTime << "s" << std::endl;
+
+                // 使用时间测量执行轨迹
+                executeTrajectoryWithTiming(demo, selectedPoints, params1, speedPercent, tcpOffset, "Sideahead");
                 // std::this_thread::sleep_for(std::chrono::seconds(2));
 
                 // 根据是否是最后一行选择不同的动作
@@ -754,8 +887,8 @@ void processFolderTrajectory(DobotTcpDemo *demo, const std::string &folderPath, 
                 }
                 else
                 {
-                    std::cout << "hello " << std::endl;
-
+                    std::cout << "sideahead最后一段轨迹完成" << std::endl;
+                    // 原来 sideahead 的退出模式：y +20
                     Dobot::CDescartesPoint rotatetooljointleave{};
                     rotatetooljointleave.x = 0;
                     rotatetooljointleave.y = 20;
@@ -764,7 +897,6 @@ void processFolderTrajectory(DobotTcpDemo *demo, const std::string &folderPath, 
                     rotatetooljointleave.ry = 0;
                     rotatetooljointleave.rz = 0;
                     demo->RelMovJDemo(rotatetooljointleave, 0, 5, 20, 50, 100);
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
                 }
             }
         }
@@ -956,7 +1088,7 @@ void processFolderTrajectory(DobotTcpDemo *demo, const std::string &folderPath, 
                     const Dobot::CDescartesPoint firstPosesk = allPoints[currentTargetId];
                     const Dobot::CDescartesPoint pointstartsk =
                         computeBrushApproachStart(firstPosesk, 38.0);
-                    runSideAheadGuideWithTransition(demo, pickedPathPoints, "浮刷前", &pointstartsk);
+                    runSideAheadGuideWithTransition(demo, pickedPathPoints, "浮刷前", &pointstartsk, speedPercent, tcpOffset);
                 }
             }
 
@@ -1121,7 +1253,29 @@ int main()
     applyBrushTcpFromJson(demo, "../defaultconfig/brushoffsets.json");
 
     double configBrushSpeed = 80.0;
+    Eigen::Vector3d brushTcpOffset(0, 0, 0); // TCP刷头偏移量
     std::ifstream configFile("D:\\UsmileProject\\hand_eye_calibration\\UsmileUi\\defaultconfig\\config.json");
+    std::ifstream brushOffsetFile("../defaultconfig/brushoffsets.json");
+    if (brushOffsetFile.is_open())
+    {
+        try
+        {
+            json brushJson;
+            brushOffsetFile >> brushJson;
+            // 从brushoffsets.json读取TCP偏移
+            double brushX = brushJson.value("brushxoffsets", 0.0);
+            double brushY = brushJson.value("brushyoffsets", 0.0);
+            double brushZ = brushJson.value("brushzoffsets", 0.0);
+            // 基础TCP + 用户偏移 = 最终TCP在tool5坐标系下的位置
+            const double baseTcpX = -9.748236;
+            const double baseTcpY = -186.312977;
+            const double baseTcpZ = 223.252632;
+            brushTcpOffset = Eigen::Vector3d(baseTcpX - brushX, baseTcpY - brushY, baseTcpZ - brushZ);
+            std::cout << "[TCP偏移] X=" << brushTcpOffset.x() << " Y=" << brushTcpOffset.y() << " Z=" << brushTcpOffset.z() << std::endl;
+        }
+        catch (...) {}
+        brushOffsetFile.close();
+    }
     if (configFile.is_open())
     {
         try
@@ -1156,10 +1310,13 @@ int main()
     // 1. 进入键盘微调模式，手动对准后获取 Offset
     Eigen::Vector3d totalOffset{0, 0, 0};
 
+    // 速度设置交互
+    double speedPercent = getSpeedSetting();
+
     // 2. 设置轨迹运行参数
     Dobot::MovSParams params{};
-    params.speed = configBrushSpeed;
-    params.v = 80;
+    params.hasSpeed = false;  // 使用 v 百分比模式
+    params.v = speedPercent;  // v 是百分比 (1-100)
     params.a = 80;
     params.freq = 0.2;
 
@@ -1186,7 +1343,7 @@ int main()
         if (entry.is_directory())
         {
             std::cout << "\n>> 开始区域: " << entry.path().filename().string() << std::endl;
-            processFolderTrajectory(demo, entry.path().string(), entry.path().filename().string(), params, totalOffset, rebrush);
+            processFolderTrajectory(demo, entry.path().string(), entry.path().filename().string(), params, totalOffset, rebrush, speedPercent, brushTcpOffset);
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     }
